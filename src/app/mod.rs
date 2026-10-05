@@ -46,6 +46,7 @@ const IDM_EXIT: usize = 40004;
 pub struct App {
     config: Config,
     hwnd: HWND,
+    hinstance: HINSTANCE,
 }
 
 /// 入口：单实例检查 → 创建消息窗口 → 托盘 / 热键 → 消息循环。
@@ -67,7 +68,11 @@ pub fn run() -> i32 {
         }
     };
 
-    let mut app = Box::new(App { config, hwnd });
+    let mut app = Box::new(App {
+        config,
+        hwnd,
+        hinstance,
+    });
     app.init_tray();
     app.maybe_warn_no_modifier_clash();
     app.register_hotkeys();
@@ -115,7 +120,7 @@ fn acquire_single_instance() -> bool {
 /// 注册隐藏窗口类并创建消息窗口。
 fn create_message_window(hinstance: HINSTANCE) -> Result<HWND, String> {
     unsafe {
-        let icon = LoadIconW(None, IDI_APPLICATION).unwrap_or_default();
+        let icon = LoadIconW(Some(hinstance), icon_resource()).unwrap_or_default();
         let wc = WNDCLASSW {
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(wndproc),
@@ -161,7 +166,7 @@ impl App {
             uID: ID_TRAY,
             uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
             uCallbackMessage: WM_TRAY,
-            hIcon: unsafe { LoadIconW(None, IDI_APPLICATION).unwrap_or_default() },
+            hIcon: unsafe { LoadIconW(Some(self.hinstance), icon_resource()).unwrap_or_default() },
             szTip: wide_array("jietu 截图工具"),
             ..Default::default()
         };
@@ -360,6 +365,11 @@ fn mod_flags(modifiers: u32) -> HOT_KEY_MODIFIERS {
     }
     m |= MOD_NOREPEAT;
     m
+}
+
+/// 程序主图标资源（app.rc 中的 ID=1）。
+fn icon_resource() -> PCWSTR {
+    PCWSTR::from_raw(1 as *const u16)
 }
 
 /// UTF-16 结尾 NUL 的 PCWSTR（临时值，仅限同一表达式内使用）。
