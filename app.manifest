@@ -2,6 +2,14 @@
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="jietu" type="win32"/>
   <description>轻量原生截图与标注工具</description>
+  <!-- 始终以管理员运行：可覆盖管理员窗口、可向管理员窗口发送输入（见 ADR 0003） -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
       <!-- Windows 10 / 11 -->
