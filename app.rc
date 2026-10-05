@@ -1,2 +1,3 @@
-// 资源脚本：引用应用清单（DPI 感知）。
+// 资源脚本：应用清单（DPI 感知）与程序图标。
 1 24 "app.manifest"
+1 ICON "assets/icons/app.ico"
