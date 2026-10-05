@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! 轻量截图工具入口。
-//!
-//! 当前处于 M0 骨架阶段，仅声明模块结构，尚未实现功能。
-//! 里程碑规划见 `screenshot-tool-PRD.md` 第 7 节。
-
-#![allow(dead_code)] // 骨架阶段：模块占位，待各里程碑实现后移除
+//! 入口：初始化应用壳并进入消息循环。
 
 pub mod app;
 pub mod capture;
@@ -19,5 +14,5 @@ pub mod settings;
 pub mod theme;
 
 fn main() {
-    // 骨架阶段暂无逻辑；M0 将在此初始化托盘、热键与消息循环。
+    std::process::exit(app::run());
 }
