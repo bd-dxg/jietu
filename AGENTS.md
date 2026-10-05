@@ -1,0 +1,59 @@
+# jietu 开发指南
+
+## 项目概览
+
+轻量原生截图与标注工具（Windows 11，Rust + windows-rs，纯 CPU 渲染），面向无独显迷你主机。目标：常驻 ≈0 开销、触发即用、框选/箭头/文本/高斯模糊/高亮标注、长截图、贴图。
+
+完整需求见 `screenshot-tool-PRD.md`，域术语见 `CONTEXT.md`，架构决策见 `docs/adr/`。
+
+## 项目状态
+
+- 当前处于 **M0 骨架刚初始化** 阶段：Cargo 工程 + 11 个模块占位 + 领域文档已就绪，尚未实现任何功能。
+- 开发由 AI 驱动，本文件是进入此仓库的 agent 的上下文。
+
+## 技术栈
+
+- 语言：Rust 1.98（edition 2024）
+- 系统 API：`windows` crate（windows-rs 0.62.2）
+- 渲染：`tiny-skia` 0.12（纯 CPU 矢量绘制）+ DirectWrite 文本栅格化
+- 配置/编码：`serde` + `toml`、`png`
+
+## 常用命令
+
+- 编译检查：`cargo check`
+- 运行：`cargo run`（GUI 桌面程序，需 Windows 桌面会话；当前骨架阶段无可见界面）
+- 构建发布版：`cargo build --release`（已配 `lto="fat"`、`opt-level="z"`、`panic="abort"`、`strip=true`）
+- 测试：`cargo test`（当前无测试）
+- 格式化检查：`cargo fmt --check`（提交前必须通过）
+
+## 开发流程（AI 驱动约定）
+
+1. 按里程碑推进（PRD §7：M0 → M5，二期另行），每次只实现当前里程碑需求，不做投机性代码。
+2. 实现功能前先同步文档：新术语写入 `CONTEXT.md`；不可逆/高杠杆决策记入 `docs/adr/NNNN-*.md`；需求变更落在 PRD 对应编号。
+3. 每个源文件保留头部 `SPDX-License-Identifier: GPL-3.0-only`。
+4. 引入新依赖前确认许可证与 GPL-3.0-only 兼容，并说明用途。
+5. `windows` crate 按需开启 features，不一次性全量开启。
+
+## 代码约定
+
+- 目录结构固定为 PRD §6.2 模块划分：`app/`、`capture/`、`overlay/`、`pin/`、`editor/`、`render/`、`longshot/`、`output/`、`settings/`、`theme/`、`ocr/`（二期）。
+- 模块 doc 注释中标注对应需求编号（SYS-1、CAP-2、EDT-1…），便于追溯。
+- 标注采用矢量对象模型（底图不变，对象列表叠加），渲染用脏矩形局部重绘。
+- 所有坐标统一为物理像素（Per-Monitor V2 manifest）。
+- 一期界面仅简体中文，代码层预留 i18n。
+
+## 性能红线（必须守住）
+
+- 待机 CPU 0%（无轮询、无定时器，长截图期间除外）
+- 待机内存（Private Working Set）≤ 15 MB
+- 热键到覆盖层显示 ≤ 150 ms（1080p）/ ≤ 250 ms（4K）
+- 交互 ≥ 60 FPS，不依赖 GPU 合成
+
+## 注意事项
+
+- 无 GPU 可用：模糊、缩放、重采样等重操作需盒式近似 + 局部缓存 + 低质量预览，禁止全帧逐像素重算。
+- 全局热键 F1/F3 会抢占其他程序按键，设置面板必须给出提示；注册失败要检测并提示冲突。
+- 长截图（M4）是最大风险点：优先自动滚动 + 手动兜底，拼接要处理固定区域（页眉/页脚），失败提供撤销最后一段入口。
+- 贴图窗口用 `WS_EX_TOPMOST | WS_EX_TOOLWINDOW` 分层窗口，窗口静止时禁止任何重绘。
+- 二期 OCR/翻译涉及第三方服务：默认关闭、首次显式授权、密钥用 DPAPI 加密、不留存请求内容。
+- 发布前用 `cargo-deny` / `cargo-about` 检查依赖许可证，生成第三方声明。
