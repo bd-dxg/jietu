@@ -270,7 +270,7 @@ impl App {
 
     fn handle_command(&self, id: u16) {
         match id as usize {
-            IDM_SHOT => self.not_yet("截图功能", "M1 里程碑"),
+            IDM_SHOT => self.start_capture(),
             IDM_LONGSHOT => self.not_yet("长截图功能", "M4 里程碑"),
             IDM_SETTINGS => self.not_yet("设置面板", "M3 里程碑"),
             IDM_EXIT => unsafe {
@@ -283,10 +283,26 @@ impl App {
     /// 全局热键分发（SYS-2）。
     fn handle_hotkey(&self, id: i32) {
         match id {
-            ID_HOTKEY_SHOT => self.not_yet("截图功能", "M1 里程碑"),
+            ID_HOTKEY_SHOT => self.start_capture(),
             ID_HOTKEY_PIN => self.not_yet("贴图功能", "M2b 里程碑"),
             _ => {}
         }
+    }
+
+    /// 触发截图：抓屏 + 覆盖层（CAP-1），在独立线程运行避免嵌套消息循环。
+    fn start_capture(&self) {
+        let hinstance = self.hinstance.0 as usize;
+        std::thread::spawn(move || {
+            let hinstance = HINSTANCE(hinstance as *mut _);
+            match crate::capture::capture_virtual_screen() {
+                Ok(screen) => {
+                    crate::overlay::Overlay::run(screen, hinstance);
+                }
+                Err(e) => unsafe {
+                    let _ = MessageBoxW(None, wide(&format!("抓屏失败：{e}")), w!("jietu"), MB_OK | MB_ICONERROR);
+                },
+            }
+        });
     }
 
     fn not_yet(&self, feature: &str, milestone: &str) {
