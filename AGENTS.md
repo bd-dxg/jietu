@@ -28,11 +28,12 @@
 
 ## 开发流程（AI 驱动约定）
 
-1. 按里程碑推进（PRD §7：M0 → M5，二期另行），每次只实现当前里程碑需求，不做投机性代码。
-2. 实现功能前先同步文档：新术语写入 `CONTEXT.md`；不可逆/高杠杆决策记入 `docs/adr/NNNN-*.md`；需求变更落在 PRD 对应编号。
-3. 每个源文件保留头部 `SPDX-License-Identifier: GPL-3.0-only`。
-4. 引入新依赖前确认许可证与 GPL-3.0-only 兼容，并说明用途。
-5. `windows` crate 按需开启 features，不一次性全量开启。
+1. **禁止在主分支（main）直接开发**：任何功能、修复、优化都必须新建分支（命名建议 `feat/*`、`fix/*`、`docs/*`），完成后以 Pull Request 提交、经审查后合并回 main。main 只接受 PR 合并，不允许本地直接 push。
+2. 按里程碑推进（PRD §7：M0 → M5，二期另行），每次只实现当前里程碑需求，不做投机性代码。
+3. 实现功能前先同步文档：新术语写入 `CONTEXT.md`；不可逆/高杠杆决策记入 `docs/adr/NNNN-*.md`；需求变更落在 PRD 对应编号。
+4. 每个源文件保留头部 `SPDX-License-Identifier: GPL-3.0-only`。
+5. 引入新依赖前确认许可证与 GPL-3.0-only 兼容，并说明用途。
+6. `windows` crate 按需开启 features，不一次性全量开启。
 
 ## 代码约定
 
