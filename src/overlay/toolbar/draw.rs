@@ -1,159 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! 覆盖层工具栏（EDT-7）：工具切换、颜色、线宽、填充/圆角开关、撤销/重做。
-//! 自绘（tiny-skia 直接画进覆盖层像素图），布局与命中测试集中在此模块。
+//! 工具栏绘制：把工具栏渲染到覆盖层像素图。
 
 use tiny_skia::{Paint, PathBuilder, Pixmap, Rect, Transform};
 
 use crate::editor::{Kind, Object, PALETTE, Point, Style, Tool, WIDTH_PRESETS};
-use crate::overlay::{INFO_OFFSET, INFO_TEXT_H, SelRect};
+use crate::overlay::SelRect;
+use crate::overlay::toolbar::{ACCENT, ACCENT_SOFT, Action, BG, BORDER, GAP, H, ICON, ICON_DIM, State, Toolbar};
 use crate::render;
 
-/// 工具栏高度。
-const H: i32 = 34;
-/// 内边距。
-const PAD: i32 = 5;
-/// 方形按钮边长（工具、撤销、开关）。
-const BTN: i32 = 26;
-/// 色块边长。
-const SW: i32 = 22;
-/// 线宽按钮宽度。
-const WW: i32 = 24;
-/// 元素间距。
-const GAP: i32 = 4;
-/// 组分隔区宽度。
-const SEP: i32 = 9;
-/// 与选区的最小间隔。
-const OFFSET: i32 = INFO_OFFSET;
-
-const BG: [u8; 4] = [32, 32, 32, 240];
-const BORDER: [u8; 4] = [255, 255, 255, 60];
-const ICON: [u8; 4] = [255, 255, 255, 235];
-const ICON_DIM: [u8; 4] = [255, 255, 255, 70];
-const ACCENT: [u8; 4] = [26, 115, 232, 255];
-const ACCENT_SOFT: [u8; 4] = [26, 115, 232, 90];
-
-/// 工具栏当前状态（决定高亮与可用性）。
-#[derive(Clone, Copy, PartialEq)]
-pub struct State {
-    pub tool: Tool,
-    pub color: usize,
-    pub width: usize,
-    /// 矩形是否填充（EDT-1）。
-    pub filled: bool,
-    /// 矩形是否圆角（EDT-1）。
-    pub round: bool,
-    pub can_undo: bool,
-    pub can_redo: bool,
-}
-
-/// 工具栏动作。
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Action {
-    Tool(Tool),
-    Color(usize),
-    Width(usize),
-    ToggleFill,
-    ToggleRound,
-    Undo,
-    Redo,
-}
-
-/// 工具栏布局：整体矩形 + 各元素命中区。
-#[derive(Clone)]
-pub struct Toolbar {
-    pub rect: SelRect,
-    hits: Vec<(SelRect, Action)>,
-}
-
-impl Toolbar {
-    /// 命中测试：返回落在哪个元素上。
-    pub fn hit(&self, x: i32, y: i32) -> Option<Action> {
-        self.hits
-            .iter()
-            .find(|(r, _)| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
-            .map(|(_, a)| *a)
-    }
-}
-
-/// 布局游标：依次排布元素，返回元素左边界。
-struct Cursor {
-    x: i32,
-}
-
-impl Cursor {
-    fn next(&mut self, w: i32) -> i32 {
-        let x = self.x;
-        self.x += w + GAP;
-        x
-    }
-
-    fn sep(&mut self) {
-        self.x += SEP - GAP;
-    }
-}
-
-/// 计算工具栏布局：优先放在选区下方，空间不足则放上方。
-pub fn layout(sel: SelRect, screen_w: i32, screen_h: i32) -> Toolbar {
-    let mut c = Cursor { x: PAD };
-    let mut hits: Vec<(SelRect, Action)> = Vec::new();
-    let mut item = |c: &mut Cursor, w: i32, h: i32, action: Action| {
-        let x = c.next(w);
-        let y = (H - h) / 2;
-        hits.push((SelRect { x, y, w, h }, action));
-    };
-
-    for tool in Tool::ALL {
-        item(&mut c, BTN, BTN, Action::Tool(tool));
-    }
-    c.sep();
-    for i in 0..PALETTE.len() {
-        item(&mut c, SW, SW, Action::Color(i));
-    }
-    c.sep();
-    for i in 0..WIDTH_PRESETS.len() {
-        item(&mut c, WW, BTN, Action::Width(i));
-    }
-    c.sep();
-    item(&mut c, BTN, BTN, Action::ToggleFill);
-    item(&mut c, BTN, BTN, Action::ToggleRound);
-    c.sep();
-    item(&mut c, BTN, BTN, Action::Undo);
-    item(&mut c, BTN, BTN, Action::Redo);
-
-    let w = c.x - GAP + PAD;
-    let x = sel.x.clamp(4, (screen_w - w - 4).max(4));
-    // 信息文字占位（见 overlay::text_rect）：与文字同侧时需再让出一个文字高度，避免重叠
-    let text_above = sel.y > INFO_TEXT_H + INFO_OFFSET;
-    let below = sel.y + sel.h + OFFSET + if text_above { 0 } else { INFO_TEXT_H };
-    let y = if below + H + 4 <= screen_h {
-        below
-    } else if text_above {
-        (sel.y - INFO_OFFSET - INFO_TEXT_H - OFFSET - H).max(4)
-    } else {
-        (sel.y - OFFSET - H).max(4)
-    };
-    let bar = SelRect { x, y, w, h: H };
-
-    // 相对坐标 → 屏幕坐标
-    let hits = hits
-        .into_iter()
-        .map(|(r, a)| {
-            (
-                SelRect {
-                    x: r.x + x,
-                    y: r.y + y,
-                    w: r.w,
-                    h: r.h,
-                },
-                a,
-            )
-        })
-        .collect();
-    Toolbar { rect: bar, hits }
-}
-
-/// 把工具栏绘制到覆盖层像素图。
-pub fn draw(pixmap: &mut Pixmap, bar: &Toolbar, state: &State) {
+/// 绘制工具栏到像素图。
+pub fn render(pixmap: &mut Pixmap, bar: &Toolbar, state: &State) {
     rounded_rect(pixmap, bar.rect, 7.0, BG, Some(BORDER));
 
     // 组分隔线：画在每个组首个元素左侧的空白处
@@ -361,53 +217,5 @@ fn draw_undo_icon(pixmap: &mut Pixmap, r: SelRect, color: [u8; 4], mirror: bool)
             Transform::identity(),
             None,
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sel(x: i32, y: i32, w: i32, h: i32) -> SelRect {
-        SelRect { x, y, w, h }
-    }
-
-    /// 工具栏不能与信息文字重叠，否则 GDI 文字会盖在工具栏上（见 overlay::text_rect）。
-    #[test]
-    fn toolbar_never_overlaps_info_text() {
-        let (vw, vh) = (2560, 1440);
-        let cases = [
-            sel(100, 100, 400, 300),   // 常规：文字在上、工具栏在下
-            sel(100, 4, 400, 300),     // 贴顶：文字在下，工具栏再往下让一个文字高度
-            sel(100, 100, 900, 1300),  // 贴底：工具栏翻到文字上方
-            sel(100, 4, 900, 1420),    // 贴顶贴底：工具栏翻到上方、文字在下方
-            sel(2400, 100, 150, 1200), // 靠右：工具栏贴右边
-        ];
-        for s in cases {
-            let bar = layout(s, vw, vh).rect;
-            let text = super::super::text_rect(s, vw);
-            assert!(
-                super::super::intersect_rect(bar, text).is_none(),
-                "工具栏 {bar:?} 与信息文字 {text:?} 重叠（选区 {s:?}）"
-            );
-            assert!(bar.y >= 0 && bar.y + bar.h <= vh, "工具栏应在屏幕内：{bar:?}");
-            assert!(bar.x >= 0 && bar.x + bar.w <= vw, "工具栏应在屏幕内：{bar:?}");
-        }
-    }
-
-    #[test]
-    fn toolbar_hit_maps_each_element() {
-        let bar = layout(sel(100, 100, 400, 300), 2560, 1440);
-        let y = bar.rect.y + H / 2;
-        let center = |offset: i32| bar.hit(bar.rect.x + offset, y);
-        assert_eq!(center(18), Some(Action::Tool(Tool::Rect)));
-        assert_eq!(center(48), Some(Action::Tool(Tool::Arrow)));
-        assert_eq!(center(81), Some(Action::Color(0)));
-        assert_eq!(center(107), Some(Action::Color(1)));
-        assert_eq!(center(217), Some(Action::Width(0)));
-        assert_eq!(center(307), Some(Action::ToggleFill));
-        assert_eq!(center(337), Some(Action::ToggleRound));
-        assert_eq!(center(372), Some(Action::Undo));
-        assert_eq!(center(402), Some(Action::Redo));
     }
 }
