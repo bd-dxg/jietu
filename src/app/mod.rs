@@ -5,14 +5,11 @@
 use std::mem::size_of;
 
 use windows::Win32::Foundation::{
-    ERROR_ALREADY_EXISTS, ERROR_HOTKEY_ALREADY_REGISTERED, ERROR_SUCCESS, GetLastError, HINSTANCE, HWND, LPARAM,
-    LRESULT, POINT, WPARAM,
+    ERROR_ALREADY_EXISTS, ERROR_HOTKEY_ALREADY_REGISTERED, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT,
+    WPARAM,
 };
 use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
-use windows::Win32::System::Registry::{
-    HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_BINARY, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
-};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey,
@@ -26,9 +23,8 @@ use crate::theme;
 
 const WINDOW_CLASS: PCWSTR = w!("jietu.hidden");
 const MUTEX_NAME: PCWSTR = w!("Local\\jietu.single.instance");
-const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
-const STARTUP_APPROVED_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run");
-const RUN_VALUE: PCWSTR = w!("jietu");
+/// 任务计划名称（开机自启，见 ADR 0003）。
+const TASK_NAME: &str = "jietu";
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_ACTIVATE: u32 = WM_APP + 2; // 单实例唤起已有实例
@@ -406,64 +402,37 @@ fn wide_array<const N: usize>(s: &str) -> [u16; N] {
     arr
 }
 
-/// 开机自启是否启用（SYS-4）：
-/// Run 键值存在，且 StartupApproved 未标记禁用（尊重任务管理器的禁用状态）。
+/// 开机自启是否启用（SYS-4）：任务计划中存在 "jietu" 任务。
 pub fn autostart_enabled() -> bool {
-    unsafe {
-        let mut size = 0u32;
-        let err = RegGetValueW(
-            HKEY_CURRENT_USER,
-            RUN_KEY,
-            RUN_VALUE,
-            RRF_RT_REG_SZ,
-            None,
-            None,
-            Some(&mut size),
-        );
-        if err != ERROR_SUCCESS {
-            return false;
-        }
-        let mut data = [0u8; 12];
-        let mut dsize = data.len() as u32;
-        let err2 = RegGetValueW(
-            HKEY_CURRENT_USER,
-            STARTUP_APPROVED_KEY,
-            RUN_VALUE,
-            RRF_RT_REG_BINARY,
-            None,
-            Some(data.as_mut_ptr() as *mut _),
-            Some(&mut dsize),
-        );
-        // StartupApproved 缺失 = 启用；byte0 == 2 表示被任务管理器禁用。
-        match err2 == ERROR_SUCCESS {
-            true => data[0] != 2,
-            false => true,
-        }
-    }
+    run_schtasks(&["/Query", "/TN", TASK_NAME])
 }
 
-/// 设置开机自启（SYS-4）。
+/// 设置开机自启（SYS-4）：创建/删除登录时以最高权限运行的任务计划。
+/// 程序始终以管理员运行（见 ADR 0003），HKCU Run 键无法启动需提权的程序，故改用任务计划。
 pub fn set_autostart(enabled: bool) {
-    unsafe {
-        if enabled {
-            let path = exe_path_quoted();
-            let mut buf: Vec<u16> = path.encode_utf16().collect();
-            buf.push(0);
-            let _ = RegSetKeyValueW(
-                HKEY_CURRENT_USER,
-                RUN_KEY,
-                RUN_VALUE,
-                REG_SZ.0,
-                Some(buf.as_ptr() as *const _),
-                (buf.len() * 2) as u32,
-            );
-        } else {
-            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE);
-        }
+    if enabled {
+        let path = exe_path_quoted();
+        run_schtasks(&[
+            "/Create", "/F", "/TN", TASK_NAME, "/TR", &path, "/SC", "ONLOGON", "/RL", "HIGHEST",
+        ]);
+    } else {
+        run_schtasks(&["/Delete", "/F", "/TN", TASK_NAME]);
     }
 }
 
-/// 当前可执行文件路径（带引号，注册表 Run 键的标准格式）。
+/// 调用 schtasks.exe 并返回是否成功（隐藏控制台窗口）。
+fn run_schtasks(args: &[&str]) -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("schtasks")
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// 当前可执行文件路径（带引号）。
 fn exe_path_quoted() -> String {
     unsafe {
         let mut buf = [0u16; 1024];
