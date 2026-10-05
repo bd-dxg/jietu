@@ -6,7 +6,9 @@
   1. `app.manifest` 声明 `requestedExecutionLevel level="requireAdministrator"`，程序始终以管理员权限运行。
   2. 开机自启从 `HKCU\...\Run` 键改为**任务计划程序**：`schtasks /Create /SC ONLOGON /RL HIGHEST`，删除对应任务即关闭自启。
   3. 热键继续使用 `RegisterHotKey`（不引入低级键盘钩子）。若被其他软件抢占，注册失败时提示用户改键。
+  4. 构建区分：**release** 构建（`app.manifest`）声明 `requireAdministrator`；**dev** 构建（`app.dev.manifest`）声明 `asInvoker` 不提权，便于 `cargo run` / `cargo test` 调试。两者仅权限不同，功能代码一致。
 - **Consequences**:
   - 更容易：覆盖层可覆盖管理员窗口；`SendInput` 对管理员窗口有效（长截图前提）；热键注册在与同级进程竞争中更有利。
-  - 更难：每次启动弹出 UAC 提示，开发调试不便；提权进程无法接收普通进程的拖放（未来若做「拖入图片」功能需注意）；自启依赖任务计划而非注册表；查询/写入任务计划需要管理员权限（当前进程已是管理员，满足）。
+  - 更难：每次启动弹出 UAC 提示（仅 release）；提权进程无法接收普通进程的拖放（未来若做「拖入图片」功能需注意）；自启依赖任务计划而非注册表；查询/写入任务计划需要管理员权限。
+  - 注意：dev 构建不提权，因此 **dev 下无法覆盖/操作管理员窗口**，验证该能力需用 release 构建。
   - 注意：热键优先级仍由注册顺序决定，管理员权限不改变这一点；只有低级键盘钩子（WH_KEYBOARD_LL）会插队，本决策不引入钩子。
