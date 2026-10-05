@@ -1,48 +1,42 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! 应用壳：托盘（SYS-1）、全局热键（SYS-2）、单实例（SYS-3）、
-//! 开机自启（SYS-4）、消息分发。基于 Win32 自管消息循环（事件驱动，无轮询）。
+//! 应用壳（SYS-1/2/3/4/6）：单实例、隐藏消息窗口、托盘、热键、自启、主题变更。
+//! 拆分：`run` 入口与消息分发见本文件，托盘在 `tray`，热键在 `hotkey`，自启在 `autostart`。
 
-use std::mem::size_of;
+pub mod autostart;
+mod hotkey;
+mod tray;
 
-use windows::Win32::Foundation::{
-    ERROR_ALREADY_EXISTS, ERROR_HOTKEY_ALREADY_REGISTERED, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT,
-    WPARAM,
-};
+use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::HBRUSH;
-use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey,
-};
-use windows::Win32::UI::Shell::{NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NOTIFYICONDATAW, Shell_NotifyIconW};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
 use crate::settings::Config;
 use crate::theme;
 
-const WINDOW_CLASS: PCWSTR = w!("jietu.hidden");
+/// 消息窗口类名（`FindWindowW` 唤起已有实例时用到）。
+pub const WINDOW_CLASS: PCWSTR = w!("jietu.hidden");
 const MUTEX_NAME: PCWSTR = w!("Local\\jietu.single.instance");
-/// 任务计划名称（开机自启，见 ADR 0003）。
-const TASK_NAME: &str = "jietu";
-
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_ACTIVATE: u32 = WM_APP + 2; // 单实例唤起已有实例
 
-const ID_TRAY: u32 = 1;
-const ID_HOTKEY_SHOT: i32 = 101;
-const ID_HOTKEY_PIN: i32 = 102;
+pub const ID_TRAY: u32 = 1;
+pub const ID_HOTKEY_SHOT: i32 = 101;
+pub const ID_HOTKEY_PIN: i32 = 102;
 
-const IDM_SHOT: usize = 40001;
-const IDM_LONGSHOT: usize = 40002;
-const IDM_SETTINGS: usize = 40003;
-const IDM_EXIT: usize = 40004;
+/// 托盘菜单项 id（供 `tray` 子模块使用）。
+pub const IDM_SHOT: usize = 40001;
+pub const IDM_LONGSHOT: usize = 40002;
+pub const IDM_SETTINGS: usize = 40003;
+pub const IDM_EXIT: usize = 40004;
 
 /// 应用运行时状态。
 pub struct App {
-    config: Config,
-    hwnd: HWND,
-    hinstance: HINSTANCE,
+    pub config: Config,
+    pub hwnd: HWND,
+    pub hinstance: HINSTANCE,
 }
 
 /// 入口：单实例检查 → 创建消息窗口 → 托盘 / 热键 → 消息循环。
@@ -113,7 +107,39 @@ fn acquire_single_instance() -> bool {
     }
 }
 
-/// 注册隐藏窗口类并创建消息窗口。
+impl App {
+    pub fn start_capture(&self) {
+        let hinstance = self.hinstance.0 as usize;
+        std::thread::spawn(move || {
+            let hinstance = HINSTANCE(hinstance as *mut _);
+            match crate::capture::capture_virtual_screen() {
+                Ok(screen) => {
+                    crate::overlay::Overlay::run(screen, hinstance);
+                }
+                Err(e) => unsafe {
+                    let _ = MessageBoxW(None, wide(&format!("抓屏失败：{e}")), w!("jietu"), MB_OK | MB_ICONERROR);
+                },
+            }
+        });
+    }
+
+    pub fn not_yet(&self, feature: &str, milestone: &str) {
+        unsafe {
+            let text = format!("{feature}尚未实现（{milestone}）。");
+            let _ = MessageBoxW(Some(self.hwnd), wide(&text), w!("jietu"), MB_OK | MB_ICONINFORMATION);
+        }
+    }
+
+    /// WM_SETTINGCHANGE：主题变更时刷新（SYS-6）。
+    fn handle_setting_change(&self, lparam: LPARAM) {
+        if theme::is_theme_change(lparam.0 as usize) {
+            // M0 记录当前主题；设置面板（M3）与覆盖层（M1）消费。
+            let _ = theme::system_theme();
+        }
+    }
+}
+
+/// 注册消息窗口类并创建窗口（隐藏）。
 fn create_message_window(hinstance: HINSTANCE) -> Result<HWND, String> {
     unsafe {
         let icon = LoadIconW(Some(hinstance), icon_resource()).unwrap_or_default();
@@ -122,7 +148,7 @@ fn create_message_window(hinstance: HINSTANCE) -> Result<HWND, String> {
             lpfnWndProc: Some(wndproc),
             hInstance: hinstance,
             hIcon: icon,
-            hCursor: HCURSOR::default(),
+            hCursor: Default::default(),
             hbrBackground: HBRUSH::default(),
             lpszMenuName: PCWSTR::null(),
             lpszClassName: WINDOW_CLASS,
@@ -150,170 +176,6 @@ fn create_message_window(hinstance: HINSTANCE) -> Result<HWND, String> {
             Err(e) => return Err(format!("创建窗口失败：{e}")),
         };
         Ok(hwnd)
-    }
-}
-
-impl App {
-    /// 添加托盘图标（SYS-1）。
-    fn init_tray(&self) {
-        let nid = NOTIFYICONDATAW {
-            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
-            hWnd: self.hwnd,
-            uID: ID_TRAY,
-            uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
-            uCallbackMessage: WM_TRAY,
-            hIcon: unsafe { LoadIconW(Some(self.hinstance), icon_resource()).unwrap_or_default() },
-            szTip: wide_array("jietu 截图工具"),
-            ..Default::default()
-        };
-        unsafe {
-            let _ = Shell_NotifyIconW(NIM_ADD, &nid);
-        }
-    }
-
-    /// 移除托盘图标。
-    fn remove_tray(&self) {
-        let nid = NOTIFYICONDATAW {
-            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
-            hWnd: self.hwnd,
-            uID: ID_TRAY,
-            ..Default::default()
-        };
-        unsafe {
-            let _ = Shell_NotifyIconW(windows::Win32::UI::Shell::NIM_DELETE, &nid);
-        }
-    }
-
-    /// 注册全局热键（SYS-2），失败时提示冲突。
-    fn register_hotkeys(&self) {
-        let hk = &self.config.hotkey;
-        self.register_one(ID_HOTKEY_SHOT, hk.screenshot_key, "截图");
-        self.register_one(ID_HOTKEY_PIN, hk.pin_key, "贴图");
-    }
-
-    fn register_one(&self, id: i32, key: u32, name: &str) {
-        let mods = mod_flags(self.config.hotkey.modifiers);
-        let ok = unsafe { RegisterHotKey(Some(self.hwnd), id, mods, key) }.is_ok();
-        if !ok {
-            let err = unsafe { GetLastError() };
-            let text = if err == ERROR_HOTKEY_ALREADY_REGISTERED {
-                format!("热键 {name} 注册失败：该键已被其他程序占用。\n请在设置中更换热键（设置面板后续版本提供）。")
-            } else {
-                format!("热键 {name} 注册失败，错误码 {}.", err.0)
-            };
-            unsafe { MessageBoxW(Some(self.hwnd), wide(&text), w!("jietu"), MB_OK | MB_ICONWARNING) };
-        }
-    }
-
-    /// SYS-2：无修饰键的全局热键会抢占其他程序的按键，仅首次启动提示一次。
-    fn maybe_warn_no_modifier_clash(&mut self) {
-        if !self.config.hotkey_warned && self.config.hotkey.modifiers == 0 {
-            self.config.hotkey_warned = true;
-            self.config.save();
-            unsafe {
-                MessageBoxW(
-                    Some(self.hwnd),
-                    wide(
-                        "截图(F1)与贴图(F3)热键未使用修饰键，会覆盖其他程序的按键。\n如影响其他软件使用，请在设置中更换热键（设置面板后续版本提供）。",
-                    ),
-                    w!("jietu"),
-                    MB_OK | MB_ICONINFORMATION,
-                )
-            };
-        }
-    }
-
-    /// 托盘回调（SYS-1）：左键 / 右键弹出菜单。
-    fn handle_tray(&self, lparam: LPARAM) {
-        let msg = (lparam.0 & 0xFFFF) as u16;
-        if u32::from(msg) == WM_LBUTTONUP || u32::from(msg) == WM_RBUTTONUP {
-            self.show_tray_menu();
-        }
-    }
-
-    /// 右键托盘菜单。
-    fn show_tray_menu(&self) {
-        unsafe {
-            let menu = CreatePopupMenu().unwrap_or_default();
-            if menu.0.is_null() {
-                return;
-            }
-            let _ = AppendMenuW(menu, MF_STRING, IDM_SHOT, w!("截图..."));
-            let _ = AppendMenuW(menu, MF_STRING, IDM_LONGSHOT, w!("长截图..."));
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-            let _ = AppendMenuW(menu, MF_STRING, IDM_SETTINGS, w!("设置..."));
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-            let _ = AppendMenuW(menu, MF_STRING, IDM_EXIT, w!("退出"));
-
-            let mut pt = POINT::default();
-            let _ = GetCursorPos(&mut pt);
-            let _ = SetForegroundWindow(self.hwnd);
-            let id = TrackPopupMenu(
-                menu,
-                TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_BOTTOMALIGN,
-                pt.x,
-                pt.y,
-                Some(0),
-                self.hwnd,
-                None,
-            );
-            let _ = DestroyMenu(menu);
-            if id.0 != 0 {
-                self.handle_command(id.0 as u16);
-            }
-        }
-    }
-
-    fn handle_command(&self, id: u16) {
-        match id as usize {
-            IDM_SHOT => self.start_capture(),
-            IDM_LONGSHOT => self.not_yet("长截图功能", "M4 里程碑"),
-            IDM_SETTINGS => self.not_yet("设置面板", "M3 里程碑"),
-            IDM_EXIT => unsafe {
-                let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
-            },
-            _ => {}
-        }
-    }
-
-    /// 全局热键分发（SYS-2）。
-    fn handle_hotkey(&self, id: i32) {
-        match id {
-            ID_HOTKEY_SHOT => self.start_capture(),
-            ID_HOTKEY_PIN => self.not_yet("贴图功能", "M2b 里程碑"),
-            _ => {}
-        }
-    }
-
-    /// 触发截图：抓屏 + 覆盖层（CAP-1），在独立线程运行避免嵌套消息循环。
-    fn start_capture(&self) {
-        let hinstance = self.hinstance.0 as usize;
-        std::thread::spawn(move || {
-            let hinstance = HINSTANCE(hinstance as *mut _);
-            match crate::capture::capture_virtual_screen() {
-                Ok(screen) => {
-                    crate::overlay::Overlay::run(screen, hinstance);
-                }
-                Err(e) => unsafe {
-                    let _ = MessageBoxW(None, wide(&format!("抓屏失败：{e}")), w!("jietu"), MB_OK | MB_ICONERROR);
-                },
-            }
-        });
-    }
-
-    fn not_yet(&self, feature: &str, milestone: &str) {
-        unsafe {
-            let text = format!("{feature}尚未实现（{milestone}）。");
-            let _ = MessageBoxW(Some(self.hwnd), wide(&text), w!("jietu"), MB_OK | MB_ICONINFORMATION);
-        }
-    }
-
-    /// WM_SETTINGCHANGE：主题变更时刷新（SYS-6）。
-    fn handle_setting_change(&self, lparam: LPARAM) {
-        if theme::is_theme_change(lparam.0 as usize) {
-            // M0 记录当前主题；设置面板（M3）与覆盖层（M1）消费。
-            let _ = theme::system_theme();
-        }
     }
 }
 
@@ -360,39 +222,20 @@ fn app_from(hwnd: HWND) -> Option<&'static mut App> {
     }
 }
 
-/// 组装热键修饰键位标志。
-fn mod_flags(modifiers: u32) -> HOT_KEY_MODIFIERS {
-    let mut m = HOT_KEY_MODIFIERS(0);
-    if modifiers & MOD_ALT.0 != 0 {
-        m |= MOD_ALT;
-    }
-    if modifiers & MOD_CONTROL.0 != 0 {
-        m |= MOD_CONTROL;
-    }
-    if modifiers & MOD_SHIFT.0 != 0 {
-        m |= MOD_SHIFT;
-    }
-    if modifiers & MOD_WIN.0 != 0 {
-        m |= MOD_WIN;
-    }
-    m |= MOD_NOREPEAT;
-    m
-}
-
 /// 程序主图标资源（app.rc 中的 ID=1）。
-fn icon_resource() -> PCWSTR {
+pub fn icon_resource() -> PCWSTR {
     PCWSTR::from_raw(1 as *const u16)
 }
 
 /// UTF-16 结尾 NUL 的 PCWSTR（临时值，仅限同一表达式内使用）。
-fn wide(s: &str) -> PCWSTR {
+pub fn wide(s: &str) -> PCWSTR {
     let mut buf: Vec<u16> = s.encode_utf16().collect();
     buf.push(0);
     PCWSTR::from_raw(buf.as_ptr())
 }
 
 /// 将字符串写入固定长度 u16 数组（用于 NOTIFYICONDATAW.szTip 等）。
-fn wide_array<const N: usize>(s: &str) -> [u16; N] {
+pub fn wide_array<const N: usize>(s: &str) -> [u16; N] {
     let mut arr = [0u16; N];
     let mut i = 0;
     for u in s.encode_utf16().take(N - 1) {
@@ -400,44 +243,4 @@ fn wide_array<const N: usize>(s: &str) -> [u16; N] {
         i += 1;
     }
     arr
-}
-
-/// 开机自启是否启用（SYS-4）：任务计划中存在 "jietu" 任务。
-pub fn autostart_enabled() -> bool {
-    run_schtasks(&["/Query", "/TN", TASK_NAME])
-}
-
-/// 设置开机自启（SYS-4）：创建/删除登录时以最高权限运行的任务计划。
-/// 程序始终以管理员运行（见 ADR 0003），HKCU Run 键无法启动需提权的程序，故改用任务计划。
-pub fn set_autostart(enabled: bool) {
-    if enabled {
-        let path = exe_path_quoted();
-        run_schtasks(&[
-            "/Create", "/F", "/TN", TASK_NAME, "/TR", &path, "/SC", "ONLOGON", "/RL", "HIGHEST",
-        ]);
-    } else {
-        run_schtasks(&["/Delete", "/F", "/TN", TASK_NAME]);
-    }
-}
-
-/// 调用 schtasks.exe 并返回是否成功（隐藏控制台窗口）。
-fn run_schtasks(args: &[&str]) -> bool {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    std::process::Command::new("schtasks")
-        .args(args)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// 当前可执行文件路径（带引号）。
-fn exe_path_quoted() -> String {
-    unsafe {
-        let mut buf = [0u16; 1024];
-        let len = GetModuleFileNameW(None, &mut buf) as usize;
-        let path = String::from_utf16_lossy(&buf[..len]);
-        format!("\"{path}\"")
-    }
 }

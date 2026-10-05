@@ -8,7 +8,7 @@
 
 ## 项目状态
 
-- 当前处于 **M0 骨架刚初始化** 阶段：Cargo 工程 + 11 个模块占位 + 领域文档已就绪，尚未实现任何功能。
+- 当前处于 **M2 编辑器进行中** 阶段：M0（托盘/热键/配置/自启/主题）、M1（抓屏/框选/复制/保存）已完成；M2 已完成对象模型、撤销重做、矩形/直线箭头与工具栏；剩曲线箭头、高亮、模糊、文本、导出烘焙。
 - 开发由 AI 驱动，本文件是进入此仓库的 agent 的上下文。
 
 ## 技术栈
@@ -23,7 +23,7 @@
 - 编译检查：`cargo check`
 - 运行：`cargo run`（GUI 桌面程序，需 Windows 桌面会话；当前骨架阶段无可见界面）
 - 构建发布版：`cargo build --release`（已配 `lto="fat"`、`opt-level="z"`、`panic="abort"`、`strip=true`）
-- 测试：`cargo test`（当前无测试）
+- 测试：`cargo test`（当前 30+ 个：对象模型/撤销栈/矢量栅格化/光标/布局）
 - 格式化检查：`cargo fmt --check`（提交前必须通过）
 
 ## 开发流程（AI 驱动约定）
@@ -39,6 +39,7 @@
 ## 代码约定
 
 - 目录结构固定为 PRD §6.2 模块划分：`app/`、`capture/`、`overlay/`、`pin/`、`editor/`、`render/`、`longshot/`、`output/`、`settings/`、`theme/`、`ocr/`（二期）。
+- **单文件源码 ≤300 行**（硬性；`#[cfg(test)]` 测试块不计入）。超出时按职责拆出子模块（如 `overlay/` 下的 `wndproc/geometry/surface/cursor/selection/interaction/annotate/toolbar/`），子模块内 `pub(super)` 共享父模块实现。
 - 模块 doc 注释中标注对应需求编号（SYS-1、CAP-2、EDT-1…），便于追溯。
 - 标注采用矢量对象模型（底图不变，对象列表叠加），渲染用脏矩形局部重绘。
 - 所有坐标统一为物理像素（Per-Monitor V2 manifest）。
