@@ -100,18 +100,18 @@ pub struct Overlay {
 impl Overlay {
     fn new(capture: CapturedScreen) -> Result<Self, String> {
         let (w, h) = (capture.width, capture.height);
-        let original = Pixmap::from_vec(capture.rgba.clone(), tiny_skia::IntSize::from_wh(w, h).unwrap())
-            .ok_or("创建原图像素图失败")?;
+        let Some(size) = tiny_skia::IntSize::from_wh(w, h) else {
+            return Err("虚拟屏幕尺寸非法".into());
+        };
+        let original = Pixmap::from_vec(capture.rgba.clone(), size).ok_or("创建原图像素图失败")?;
         let mut dimmed = original.clone();
         // 暗化：整屏覆盖半透明黑（CAP-3：预生成暗图）。
+        let Some(full) = Rect::from_xywh(0.0, 0.0, w as f32, h as f32) else {
+            return Err("虚拟屏幕矩形非法".into());
+        };
         let mut paint = Paint::default();
         paint.set_color_rgba8(0, 0, 0, 120);
-        dimmed.fill_rect(
-            Rect::from_xywh(0.0, 0.0, w as f32, h as f32).unwrap(),
-            &paint,
-            Transform::identity(),
-            None,
-        );
+        dimmed.fill_rect(full, &paint, Transform::identity(), None);
         let display = dimmed.clone();
         Ok(Self {
             capture,
@@ -277,11 +277,12 @@ impl Overlay {
         match self.selection {
             None => {
                 // 开始框选
-                self.selection = Some(SelRect { x, y, w: 1, h: 1 });
+                let sel = SelRect { x, y, w: 1, h: 1 };
+                self.selection = Some(sel);
                 self.phase = Phase::Selecting;
                 self.drag = Some(Drag {
                     handle: Handle::Move,
-                    orig: self.selection.unwrap(),
+                    orig: sel,
                     px: x,
                     py: y,
                 });
@@ -305,11 +306,12 @@ impl Overlay {
                     self.phase = Phase::Adjusting;
                 } else {
                     // 外部点击：开始新选区
-                    self.selection = Some(SelRect { x, y, w: 1, h: 1 });
+                    let sel = SelRect { x, y, w: 1, h: 1 };
+                    self.selection = Some(sel);
                     self.phase = Phase::Selecting;
                     self.drag = Some(Drag {
                         handle: Handle::Move,
-                        orig: self.selection.unwrap(),
+                        orig: sel,
                         px: x,
                         py: y,
                     });
@@ -326,11 +328,20 @@ impl Overlay {
         let (dx, dy) = (x - drag.px, y - drag.py);
         let handle = drag.handle;
         let orig = drag.orig;
+        let phase = self.phase;
         let (vw, vh) = (self.display.width() as i32, self.display.height() as i32);
         let max_x = vw.saturating_sub(1);
         let max_y = vh.saturating_sub(1);
         let x = x.clamp(0, max_x);
         let y = y.clamp(0, max_y);
+
+        // 框选阶段：以按下点为锚点拉伸矩形
+        if phase == Phase::Selecting {
+            self.selection = Some(SelRect::normalized(orig.x, orig.y, x, y));
+            self.redraw();
+            return;
+        }
+
         let sel = self.selection.unwrap_or(orig);
         match handle {
             Handle::Move => {
@@ -388,9 +399,6 @@ impl Overlay {
                 self.selection = Some(SelRect::normalized(x, drag.orig.y, x1, y1));
             }
         }
-        if self.phase == Phase::Selecting && self.selection.is_some_and(|s| s.w > 2 && s.h > 2) {
-            self.phase = Phase::Adjusting;
-        }
         self.redraw();
     }
 
@@ -417,7 +425,9 @@ impl Overlay {
     /// Enter / Ctrl+C：复制到剪贴板并关闭（OUT-1）。
     fn on_copy(&mut self) {
         if let Some(sel) = self.selection {
-            let cropped = crop_pixmap(&self.original, sel);
+            let Some(cropped) = crop_pixmap(&self.original, sel) else {
+                return;
+            };
             std::thread::spawn(move || {
                 if let Err(e) = output::copy_to_clipboard(&cropped) {
                     unsafe {
@@ -435,7 +445,9 @@ impl Overlay {
     /// Ctrl+S：保存 PNG 到默认目录并关闭（OUT-2）。
     fn on_save(&mut self) {
         if let Some(sel) = self.selection {
-            let cropped = crop_pixmap(&self.original, sel);
+            let Some(cropped) = crop_pixmap(&self.original, sel) else {
+                return;
+            };
             std::thread::spawn(move || {
                 let dir = output::default_save_dir();
                 let _ = std::fs::create_dir_all(&dir);
@@ -541,11 +553,11 @@ fn blit_region(dst: &mut Pixmap, src: &Pixmap, r: SelRect) {
     }
 }
 
-/// 裁剪出选区像素。
-fn crop_pixmap(src: &Pixmap, r: SelRect) -> Pixmap {
+/// 裁剪出选区像素；尺寸非法时返回 None。
+fn crop_pixmap(src: &Pixmap, r: SelRect) -> Option<Pixmap> {
     let w = (r.w.max(1)) as u32;
     let h = (r.h.max(1)) as u32;
-    let mut out = Pixmap::new(w, h).unwrap();
+    let mut out = Pixmap::new(w, h)?;
     for (dy, row) in (0..h as i32).enumerate() {
         let sy = r.y + row;
         if sy < 0 || sy >= src.height() as i32 {
@@ -556,7 +568,7 @@ fn crop_pixmap(src: &Pixmap, r: SelRect) -> Pixmap {
         out.data_mut()[off_dst..off_dst + w as usize * 4]
             .copy_from_slice(&src.data()[off_src..off_src + w as usize * 4]);
     }
-    out
+    Some(out)
 }
 
 /// 画选区边框。
@@ -583,15 +595,14 @@ fn draw_rect(pixmap: &mut Pixmap, sel: SelRect) {
     pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
     // 外圈白色辅助线
     let mut pb = PathBuilder::new();
-    pb.push_rect(
-        Rect::from_xywh(
-            sel.x as f32 + 1.5,
-            sel.y as f32 + 1.5,
-            sel.w as f32 - 3.0,
-            sel.h as f32 - 3.0,
-        )
-        .unwrap(),
-    );
+    if let Some(inner) = Rect::from_xywh(
+        sel.x as f32 + 1.5,
+        sel.y as f32 + 1.5,
+        sel.w as f32 - 3.0,
+        sel.h as f32 - 3.0,
+    ) {
+        pb.push_rect(inner);
+    }
     if let Some(p) = pb.finish() {
         let mut white = Paint::default();
         white.set_color_rgba8(255, 255, 255, 160);
