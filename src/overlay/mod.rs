@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! 覆盖层（CAP-2/3）：覆盖整个虚拟屏幕的无边框置顶窗口，
 //! 冻结画面 + 选区暗化（预生成暗图 + 选区回贴原图），支持框选、移动与八向缩放。
+//! 选区确认后进入标注模式（EDT-1/EDT-2/EDT-7）：工具栏切换工具与样式，在选区内拖拽即绘制标注。
+
+mod toolbar;
 
 use std::mem::size_of;
+use std::sync::atomic::{AtomicIsize, Ordering};
 
 use tiny_skia::{Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
@@ -17,18 +21,22 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
 use crate::capture::CapturedScreen;
+use crate::editor::{self, Document, Kind, Object, Point, Style, Tool};
 use crate::output;
+use crate::render;
 
 const WINDOW_CLASS: PCWSTR = w!("jietu.overlay");
 const HANDLE_SIZE: i32 = 7; // 手柄边长
 const PICK_RADIUS: i32 = 6; // 命中判定半径
 const DIRTY_PAD: i32 = 60; // 脏区域外扩（覆盖边框、手柄与信息文字）
+const INFO_TEXT_H: i32 = 22; // 信息文字高度（text_rect 与工具栏布局共用）
+const INFO_OFFSET: i32 = 8; // 信息文字/工具栏与选区的间隔
 const ACCENT: u8 = 26; // 主题蓝
 const ACCENT_G: u8 = 115;
 const ACCENT_B: u8 = 232;
 
 /// 矩形选区（相对虚拟屏幕左上角的物理像素坐标）。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SelRect {
     pub x: i32,
     pub y: i32,
@@ -95,6 +103,18 @@ pub struct Overlay {
     pub selection: Option<SelRect>,
     phase: Phase,
     drag: Option<Drag>,
+    /// 标注文档（对象列表 + 撤销/重做，EDT-1/EDT-2/EDT-7）。
+    doc: Document,
+    /// 当前工具与样式（EDT-7）。
+    tool: Tool,
+    color_index: usize,
+    width_index: usize,
+    filled: bool,
+    round: bool,
+    /// 正在拖拽、尚未提交的标注对象。
+    draft: Option<Object>,
+    /// 当前工具栏布局（选区存在时才有）。
+    bar: Option<toolbar::Toolbar>,
     pub hwnd: HWND,
     pub cancelled: bool,
     /// 上屏用内存 DC（持有 DIB section，BGRA 像素直接写入 dib_bits）。
@@ -142,6 +162,14 @@ impl Overlay {
             selection: None,
             phase: Phase::Adjusting,
             drag: None,
+            doc: Document::new(),
+            tool: Tool::Rect,
+            color_index: 1, // 默认红色
+            width_index: 1, // 默认 4px
+            filled: false,
+            round: false,
+            draft: None,
+            bar: None,
             hwnd: HWND::default(),
             cancelled: false,
             mem_dc,
@@ -250,33 +278,34 @@ impl Overlay {
     }
 
     /// 更新选区并做脏矩形增量重绘（PRD 6.3.2）：
-    /// 只处理旧/新选区的外扩矩形，避免每次鼠标移动全屏重绘。
+    /// 只处理旧/新选区的装饰与工具栏区域，避免每次鼠标移动全屏重绘。
     fn set_selection(&mut self, new: Option<SelRect>) {
         if same_rect(self.selection, new) {
             return;
         }
+        let (vw, vh) = (self.display.width() as i32, self.display.height() as i32);
         let old = self.selection;
-        let mut dirty: Option<SelRect> = None;
-        if let Some(o) = old {
-            let restore = union_rect(
-                Some(expand_rect(o, DIRTY_PAD)),
-                Some(text_rect(o, self.display.width() as i32)),
-            );
-            if let Some(r) = restore {
-                restore_region(&mut self.display, &self.dimmed, r);
-                dirty = Some(r);
-            }
-        }
-        if let Some(n) = new {
-            blit_region(&mut self.display, &self.original, n);
-            draw_rect(&mut self.display, n);
-            draw_handles(&mut self.display, n);
-            dirty = union_rect(dirty, Some(expand_rect(n, DIRTY_PAD)));
-            dirty = union_rect(dirty, Some(text_rect(n, self.display.width() as i32)));
-        }
         self.selection = new;
+        let old_bar = self.bar.as_ref().map(|b| b.rect);
+        self.bar = new.map(|s| toolbar::layout(s, vw, vh));
+        let new_bar = self.bar.as_ref().map(|b| b.rect);
+
+        let mut dirty: Option<SelRect> = None;
+        for r in [
+            old.map(|o| expand_rect(o, DIRTY_PAD)),
+            new.map(|n| expand_rect(n, DIRTY_PAD)),
+            old.map(|o| text_rect(o, vw)),
+            new.map(|n| text_rect(n, vw)),
+            old_bar.map(|b| expand_rect(b, 2)),
+            new_bar.map(|b| expand_rect(b, 2)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            dirty = union_rect(dirty, Some(r));
+        }
         if let Some(d) = dirty {
-            self.present_region(d);
+            self.repaint(d);
         }
     }
 
@@ -320,20 +349,207 @@ impl Overlay {
         }
     }
 
-    fn on_lbutton_down(&mut self, x: i32, y: i32) {
-        let new = match self.selection {
-            None => {
-                // 开始框选
-                self.phase = Phase::Selecting;
-                let sel = SelRect { x, y, w: 1, h: 1 };
-                self.drag = Some(Drag {
-                    handle: Handle::Move,
-                    orig: sel,
-                    px: x,
-                    py: y,
-                });
-                Some(sel)
+    /// 重绘指定区域并上屏（PRD 6.3.2 脏矩形）：
+    /// 1) 底图复位（选区外恢复暗图、选区内回贴原图）2) 重绘标注 3) 选区装饰 4) 工具栏。
+    fn repaint(&mut self, r: SelRect) {
+        let r = self.expand_for_objects(r);
+        let (w, h) = (self.display.width() as i32, self.display.height() as i32);
+        let x0 = r.x.clamp(0, w);
+        let y0 = r.y.clamp(0, h);
+        let x1 = (r.x + r.w).clamp(0, w);
+        let y1 = (r.y + r.h).clamp(0, h);
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let region = SelRect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        };
+
+        // 1) 底图复位（CAP-3：预生成暗图 + 选区回贴原图）
+        restore_region(&mut self.display, &self.dimmed, region);
+        if let Some(sel) = self.selection {
+            if let Some(overlap) = intersect_rect(region, sel) {
+                blit_region(&mut self.display, &self.original, overlap);
             }
+        }
+        // 2) 标注对象（含正在拖拽的草稿）
+        render::draw_objects(
+            &mut self.display,
+            self.doc.objects(),
+            self.draft.as_ref(),
+            (x0, y0, x1, y1),
+        );
+        // 3) 选区边框与手柄（只在与选区装饰区域相交时重画）
+        if let Some(sel) = self.selection {
+            if intersect_rect(expand_rect(sel, DIRTY_PAD), region).is_some() {
+                draw_rect(&mut self.display, sel);
+                draw_handles(&mut self.display, sel);
+            }
+        }
+        // 4) 工具栏
+        let state = self.bar_state();
+        if let Some(bar) = &self.bar {
+            if intersect_rect(expand_rect(bar.rect, 2), region).is_some() {
+                toolbar::draw(&mut self.display, bar, &state);
+            }
+        }
+        self.present_region(region);
+    }
+
+    /// 把脏区扩展到与它相交的所有标注对象的完整包围盒：
+    /// 保证被绘制的对象不会画到 `region` 之外，避免像素图与窗口显示不一致。
+    fn expand_for_objects(&self, r: SelRect) -> SelRect {
+        let mut r = r;
+        loop {
+            let clip = (r.x, r.y, r.x + r.w, r.y + r.h);
+            let mut changed = false;
+            for obj in self.doc.objects().iter().chain(self.draft.iter()) {
+                let bounds = obj.bounds();
+                if render::intersects(&bounds, clip) {
+                    let c = render::bounds_to_clip(&bounds);
+                    let b = SelRect {
+                        x: c.0,
+                        y: c.1,
+                        w: c.2 - c.0,
+                        h: c.3 - c.1,
+                    };
+                    if let Some(u) = union_rect(Some(r), Some(b)) {
+                        if u != r {
+                            r = u;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                return r;
+            }
+        }
+    }
+
+    /// 当前样式（EDT-7：颜色 + 线宽）。
+    fn current_style(&self) -> Style {
+        Style::new(
+            editor::PALETTE[self.color_index],
+            editor::WIDTH_PRESETS[self.width_index],
+        )
+    }
+
+    fn bar_state(&self) -> toolbar::State {
+        toolbar::State {
+            tool: self.tool,
+            color: self.color_index,
+            width: self.width_index,
+            filled: self.filled,
+            round: self.round,
+            can_undo: self.doc.can_undo(),
+            can_redo: self.doc.can_redo(),
+        }
+    }
+
+    /// 执行工具栏动作（EDT-7）。
+    fn apply_action(&mut self, action: toolbar::Action) {
+        match action {
+            toolbar::Action::Tool(t) => self.tool = t,
+            toolbar::Action::Color(i) => self.color_index = i,
+            toolbar::Action::Width(i) => self.width_index = i,
+            toolbar::Action::ToggleFill => self.filled = !self.filled,
+            toolbar::Action::ToggleRound => self.round = !self.round,
+            toolbar::Action::Undo => return self.on_undo(),
+            toolbar::Action::Redo => return self.on_redo(),
+        }
+        // 仅工具栏自身外观发生变化
+        let bar = self.bar.as_ref().map(|b| b.rect);
+        if let Some(rect) = bar {
+            self.repaint(expand_rect(rect, 2));
+        }
+    }
+
+    /// 撤销（Ctrl+Z）。
+    fn on_undo(&mut self) {
+        if self.doc.undo() {
+            self.repaint_after_history();
+        }
+    }
+
+    /// 重做（Ctrl+Y / Ctrl+Shift+Z）。
+    fn on_redo(&mut self) {
+        if self.doc.redo() {
+            self.repaint_after_history();
+        }
+    }
+
+    /// 撤销/重做后重绘：被撤销的对象可能位于选区之外，而另一份历史快照里的
+    /// 对象包围盒不可得，故整屏重绘（仅按键/按钮触发，不在拖拽路径上）。
+    fn repaint_after_history(&mut self) {
+        let (vw, vh) = (self.display.width() as i32, self.display.height() as i32);
+        self.repaint(SelRect {
+            x: 0,
+            y: 0,
+            w: vw,
+            h: vh,
+        });
+    }
+
+    /// 在选区内开始拖拽绘制标注（EDT-1/EDT-2）。
+    fn start_draw(&mut self, x: i32, y: i32) {
+        let p = Point::new(x as f32, y as f32);
+        let kind = match self.tool {
+            Tool::Rect => Kind::Rect {
+                a: p,
+                b: p,
+                radius: if self.round { 12.0 } else { 0.0 },
+                filled: self.filled,
+            },
+            Tool::Arrow => Kind::Arrow { from: p, to: p },
+        };
+        self.doc.begin();
+        self.draft = Some(Object {
+            kind,
+            style: self.current_style(),
+        });
+    }
+
+    /// 草稿对象当前占据的像素区域。
+    fn draft_region(&self) -> Option<SelRect> {
+        let c = render::bounds_to_clip(&self.draft.as_ref()?.bounds());
+        Some(SelRect {
+            x: c.0,
+            y: c.1,
+            w: c.2 - c.0,
+            h: c.3 - c.1,
+        })
+    }
+
+    /// 开始新的框选（返回初始 1px 选区）。
+    fn begin_select(&mut self, x: i32, y: i32) -> SelRect {
+        let sel = SelRect { x, y, w: 1, h: 1 };
+        self.phase = Phase::Selecting;
+        self.drag = Some(Drag {
+            handle: Handle::Move,
+            orig: sel,
+            px: x,
+            py: y,
+        });
+        sel
+    }
+
+    fn on_lbutton_down(&mut self, x: i32, y: i32) {
+        // 工具栏优先（EDT-7）：点在工具栏上只切换状态，不开始绘制
+        let bar = self.bar.clone();
+        if let Some(bar) = &bar {
+            if in_rect(bar.rect, x, y) {
+                if let Some(action) = bar.hit(x, y) {
+                    self.apply_action(action);
+                }
+                return;
+            }
+        }
+        let new = match self.selection {
+            None => Some(self.begin_select(x, y)),
             Some(sel) => {
                 if let Some(handle) = hit_handle(sel, x, y) {
                     self.drag = Some(Drag {
@@ -345,25 +561,24 @@ impl Overlay {
                     self.phase = Phase::Adjusting;
                     Some(sel)
                 } else if sel.contains(x, y) {
-                    self.drag = Some(Drag {
-                        handle: Handle::Move,
-                        orig: sel,
-                        px: x,
-                        py: y,
-                    });
-                    self.phase = Phase::Adjusting;
-                    Some(sel)
+                    if space_down() {
+                        // 按住空格拖动：移动整个选区（CAP-2）
+                        self.drag = Some(Drag {
+                            handle: Handle::Move,
+                            orig: sel,
+                            px: x,
+                            py: y,
+                        });
+                        self.phase = Phase::Adjusting;
+                        Some(sel)
+                    } else {
+                        // 选区内按下：用当前工具绘制标注（EDT-1/EDT-2）
+                        self.start_draw(x, y);
+                        return;
+                    }
                 } else {
-                    // 外部点击：开始新选区
-                    self.phase = Phase::Selecting;
-                    let s = SelRect { x, y, w: 1, h: 1 };
-                    self.drag = Some(Drag {
-                        handle: Handle::Move,
-                        orig: s,
-                        px: x,
-                        py: y,
-                    });
-                    Some(s)
+                    // 远处点击：开始新选区
+                    Some(self.begin_select(x, y))
                 }
             }
         };
@@ -371,6 +586,31 @@ impl Overlay {
     }
 
     fn on_mouse_move(&mut self, x: i32, y: i32) {
+        // 绘制中：草稿终点跟随鼠标（限制在选区内）
+        if self.draft.is_some() {
+            let Some(sel) = self.selection else {
+                return;
+            };
+            let cx = x.clamp(sel.x, (sel.x + sel.w - 1).max(sel.x));
+            let cy = y.clamp(sel.y, (sel.y + sel.h - 1).max(sel.y));
+            let before = self.draft_region();
+            if let Some(draft) = self.draft.as_mut() {
+                match &mut draft.kind {
+                    Kind::Rect { b, .. } => {
+                        b.x = cx as f32;
+                        b.y = cy as f32;
+                    }
+                    Kind::Arrow { to, .. } => {
+                        to.x = cx as f32;
+                        to.y = cy as f32;
+                    }
+                }
+            }
+            if let Some(d) = union_rect(before, self.draft_region()) {
+                self.repaint(expand_rect(d, 2));
+            }
+            return;
+        }
         let Some(drag) = &self.drag else {
             return;
         };
@@ -423,6 +663,27 @@ impl Overlay {
     }
 
     fn on_lbutton_up(&mut self) {
+        // 结束绘制：过短视为误触，丢弃；提交后进入撤销栈
+        if let Some(draft) = self.draft.take() {
+            let kept = !is_degenerate(&draft);
+            if kept {
+                self.doc.push(draft);
+            }
+            self.doc.commit(kept);
+            let c = render::bounds_to_clip(&draft.bounds());
+            let mut region = SelRect {
+                x: c.0,
+                y: c.1,
+                w: c.2 - c.0,
+                h: c.3 - c.1,
+            };
+            if let Some(bar) = self.bar.as_ref() {
+                // 撤销/重做按钮的可用性随之变化
+                region = union_rect(Some(region), Some(expand_rect(bar.rect, 2))).unwrap_or(region);
+            }
+            self.repaint(expand_rect(region, 2));
+            return;
+        }
         self.drag = None;
         let new = match self.selection {
             Some(sel) if sel.w < 2 || sel.h < 2 => None, // 误触，放弃
@@ -539,13 +800,38 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
+        // 按住空格时切换为自绘抓手光标，提示「空格 + 拖动可移动选区」
+        WM_SETCURSOR => {
+            apply_cursor(hwnd, space_down());
+            LRESULT(1)
+        }
         WM_KEYDOWN => {
+            // 空格按下立即切抓手光标：系统只在鼠标移动时发 WM_SETCURSOR，不能等它
+            if wparam.0 as u32 == 0x20 {
+                apply_cursor(hwnd, true);
+                return LRESULT(0);
+            }
             match wparam.0 as u32 {
-                0x1B => overlay.on_cancel(),                                                    // Esc
-                0x0D => overlay.on_copy(),                                                      // Enter
-                0x43 if unsafe { GetKeyState(0x11) } as u16 & 0x8000 != 0 => overlay.on_copy(), // Ctrl+C
-                0x53 if unsafe { GetKeyState(0x11) } as u16 & 0x8000 != 0 => overlay.on_save(), // Ctrl+S
+                0x1B => overlay.on_cancel(),              // Esc
+                0x0D => overlay.on_copy(),                // Enter
+                0x43 if ctrl_down() => overlay.on_copy(), // Ctrl+C
+                0x53 if ctrl_down() => overlay.on_save(), // Ctrl+S
+                0x5A if ctrl_down() => {
+                    // Ctrl+Z 撤销 / Ctrl+Shift+Z 重做（EDT-7）
+                    if shift_down() {
+                        overlay.on_redo()
+                    } else {
+                        overlay.on_undo()
+                    }
+                }
+                0x59 if ctrl_down() => overlay.on_redo(), // Ctrl+Y
                 _ => {}
+            }
+            LRESULT(0)
+        }
+        WM_KEYUP => {
+            if wparam.0 as u32 == 0x20 {
+                apply_cursor(hwnd, false);
             }
             LRESULT(0)
         }
@@ -653,18 +939,16 @@ fn text_rect(sel: SelRect, screen_w: i32) -> SelRect {
         .chars()
         .count() as i32;
     let tw = (len * 10 + 16).min(screen_w.max(0));
-    let th = 22;
-    let tx = sel.x.min((screen_w - tw - 8).max(4)).max(4);
-    let ty = if sel.y > th + 8 {
-        sel.y - th - 8
+    let ty = if sel.y > INFO_TEXT_H + INFO_OFFSET {
+        sel.y - INFO_TEXT_H - INFO_OFFSET
     } else {
-        sel.y + sel.h + 8
+        sel.y + sel.h + INFO_OFFSET
     };
     SelRect {
-        x: tx,
+        x: sel.x.min((screen_w - tw - 8).max(4)).max(4),
         y: ty,
         w: tw,
-        h: th,
+        h: INFO_TEXT_H,
     }
 }
 
@@ -829,6 +1113,111 @@ fn create_cross_cursor() -> HCURSOR {
     }
 }
 
+/// 抓手光标句柄缓存（进程内只创建一次，避免每次截图泄漏 GDI 句柄）。
+static HAND_CURSOR: AtomicIsize = AtomicIsize::new(0);
+
+/// 手掌形状的字符画掩码，`#` 为实心（三指 + 拇指 + 掌心）。
+const HAND_MASK: [&str; 16] = [
+    ".....##........",
+    ".....##........",
+    ".....##..##....",
+    ".....##..##....",
+    ".....##..##.##.",
+    ".....##..##.##.",
+    "..#..##..##.##.",
+    "..#####..##.##.",
+    "..############.",
+    ".#############.",
+    "..############.",
+    "..############.",
+    "...###########.",
+    "...##########..",
+    "....#########..",
+    ".....#######...",
+];
+
+/// 掩码在光标画布中的偏移。
+const HAND_OFFSET: (i32, i32) = (8, 6);
+
+/// 把抓手掩码绘制到 BGRA 缓冲区：形状白色 + 外侧 1px 黑边（不侵入形状，细手指也保持白色）。
+fn paint_hand(px: &mut [u8], s: i32) {
+    let filled = |x: i32, y: i32| -> bool {
+        let (gx, gy) = (x - HAND_OFFSET.0, y - HAND_OFFSET.1);
+        if gx < 0 || gy < 0 || gy >= HAND_MASK.len() as i32 {
+            return false;
+        }
+        let row = HAND_MASK[gy as usize].as_bytes();
+        gx < row.len() as i32 && row[gx as usize] == b'#'
+    };
+    for y in 0..s {
+        for x in 0..s {
+            let inside = filled(x, y);
+            let halo = !inside && (-1..=1).any(|dy| (-1..=1).any(|dx| filled(x + dx, y + dy)));
+            if !inside && !halo {
+                continue;
+            }
+            let i = ((y * s + x) * 4) as usize;
+            let (r, g, b) = if inside { (255, 255, 255) } else { (0, 0, 0) };
+            px[i] = b;
+            px[i + 1] = g;
+            px[i + 2] = r;
+            px[i + 3] = 255;
+        }
+    }
+}
+
+/// 抓手光标（空格移动选区时使用）。
+fn hand_cursor() -> HCURSOR {
+    let cached = HAND_CURSOR.load(Ordering::Relaxed);
+    if cached != 0 {
+        return HCURSOR(cached as *mut core::ffi::c_void);
+    }
+    let cur = create_hand_cursor();
+    HAND_CURSOR.store(cur.0 as isize, Ordering::Relaxed);
+    cur
+}
+
+/// 自绘抓手光标：Win32 无内置抓手，用字符画掩码 + 外侧 1px 黑边生成 32bpp 彩色光标。
+fn create_hand_cursor() -> HCURSOR {
+    const S: i32 = 32;
+    unsafe {
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: S,
+                biHeight: -S,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            bmiColors: [Default::default()],
+        };
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let hbm_color = match CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) {
+            Ok(b) => b,
+            Err(_) => return HCURSOR::default(),
+        };
+        let px = std::slice::from_raw_parts_mut(bits as *mut u8, (S * S * 4) as usize);
+        paint_hand(px, S);
+
+        let mask = CreateBitmap(S, S, 1, 1, None);
+        let info = ICONINFO {
+            fIcon: false.into(),
+            xHotspot: (HAND_OFFSET.0 + 7) as u32,
+            yHotspot: (HAND_OFFSET.1 + 11) as u32,
+            hbmMask: mask,
+            hbmColor: hbm_color,
+        };
+        let icon = CreateIconIndirect(&info).unwrap_or_default();
+        let _ = DeleteObject(hbm_color.into());
+        if !mask.0.is_null() {
+            let _ = DeleteObject(mask.into());
+        }
+        HCURSOR(icon.0)
+    }
+}
+
 /// 裁剪出选区像素；尺寸非法时返回 None。
 fn crop_pixmap(src: &Pixmap, r: SelRect) -> Option<Pixmap> {
     let w = (r.w.max(1)) as u32;
@@ -940,9 +1329,97 @@ fn wide(s: &str) -> windows::core::PCWSTR {
     windows::core::PCWSTR::from_raw(buf.as_ptr())
 }
 
+/// 点是否在矩形内（半开区间）。
+fn in_rect(r: SelRect, x: i32, y: i32) -> bool {
+    x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h
+}
+
+/// 两矩形交集；不相交时返回 None。
+fn intersect_rect(a: SelRect, b: SelRect) -> Option<SelRect> {
+    let x0 = a.x.max(b.x);
+    let y0 = a.y.max(b.y);
+    let x1 = (a.x + a.w).min(b.x + b.w);
+    let y1 = (a.y + a.h).min(b.y + b.h);
+    if x1 <= x0 || y1 <= y0 {
+        None
+    } else {
+        Some(SelRect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        })
+    }
+}
+
+/// 误触判定：长宽均不足 2px 的对象丢弃（EDT-1/EDT-2）。
+fn is_degenerate(obj: &Object) -> bool {
+    match obj.kind {
+        Kind::Rect { a, b, .. } => (a.x - b.x).abs() < 2.0 && (a.y - b.y).abs() < 2.0,
+        Kind::Arrow { from, to } => (from.x - to.x).abs() < 2.0 && (from.y - to.y).abs() < 2.0,
+    }
+}
+
+/// 切换当前光标：按住空格时用自绘抓手，否则用窗口类光标（十字）。
+fn apply_cursor(hwnd: HWND, space: bool) {
+    unsafe {
+        let cur = if space {
+            hand_cursor()
+        } else {
+            HCURSOR(GetClassLongPtrW(hwnd, GCLP_HCURSOR) as *mut _)
+        };
+        let _ = SetCursor(Some(cur));
+    }
+}
+
+/// 修饰键是否按下（`GetKeyState` 高位为 1 表示按下）。
+fn key_down(vk: i32) -> bool {
+    unsafe { GetKeyState(vk) as u16 & 0x8000 != 0 }
+}
+
+fn ctrl_down() -> bool {
+    key_down(0x11)
+}
+
+fn shift_down() -> bool {
+    key_down(0x10)
+}
+
+/// 空格键是否按下（按住空格拖动可移动整个选区，CAP-2）。
+fn space_down() -> bool {
+    key_down(0x20)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 抓手光标创建并缓存（空格移动选区用）。
+    #[test]
+    fn hand_cursor_is_cached() {
+        let a = hand_cursor();
+        let b = hand_cursor();
+        assert!(!a.0.is_null(), "抓手光标创建失败");
+        assert_eq!(a.0, b.0, "抓手光标应复用缓存句柄");
+    }
+
+    /// 抓手掩码应同时有白色掌心/手指与黑色轮廓（否则在浅色或深色背景上会看不见）。
+    #[test]
+    fn hand_mask_has_white_shape_and_black_outline() {
+        const S: i32 = 32;
+        let mut px = vec![0u8; (S * S * 4) as usize];
+        paint_hand(&mut px, S);
+        let count = |rgb: [u8; 3]| {
+            px.chunks_exact(4)
+                .filter(|p| p[0] == rgb[2] && p[1] == rgb[1] && p[2] == rgb[0] && p[3] == 255)
+                .count()
+        };
+        let white = count([255, 255, 255]);
+        let black = count([0, 0, 0]);
+        assert!(white > 60, "白色形状过小：{white}");
+        assert!(black > 60, "黑色轮廓过小：{black}");
+        assert!(white < 400 && black < 400, "形状过大：white={white} black={black}");
+    }
 
     /// 测量热键到覆盖层可显示前的 CPU 耗时（抓屏 + Pixmap 构建 + 暗化）。
     #[test]
