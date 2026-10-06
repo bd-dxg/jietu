@@ -4,12 +4,14 @@
 //! 选区确认后进入标注模式（EDT-1/EDT-2/EDT-7）：工具栏切换工具与样式，在选区内拖拽即绘制标注。
 //!
 //! 文件分工：`wndproc` 消息分发、`geometry` 矩形运算、`surface` 像素缓冲与上屏、
-//! `cursor` 光标、`selection` 脏区重绘、`interaction` 鼠标交互、`annotate` 标注与输出、`toolbar` 工具栏。
+//! `cursor` 光标、`selection` 脏区重绘、`interaction` 鼠标交互、`pick` 对象选中与控制柄、
+//! `annotate` 标注与输出、`toolbar` 工具栏。
 
 mod annotate;
 mod cursor;
 mod geometry;
 mod interaction;
+mod pick;
 mod selection;
 mod surface;
 mod toolbar;
@@ -22,7 +24,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
 use crate::capture::CapturedScreen;
-use crate::editor::{Document, Object, Tool};
+use crate::editor::{Document, Object, Point, Tool};
 
 use geometry::SelRect;
 use interaction::{Drag, Phase};
@@ -48,6 +50,10 @@ pub struct Overlay {
     round: bool,
     /// 正在拖拽、尚未提交的标注对象。
     draft: Option<Object>,
+    /// 当前选中的对象索引（EDT-7）；控制柄仅在选中时显示（EDT-3）。
+    selected: Option<usize>,
+    /// 正在拖动的曲线控制柄：(控制点索引, 按下时的坐标)（EDT-3）。
+    ctrl_drag: Option<(usize, Point)>,
     /// 当前工具栏布局（选区存在时才有）。
     bar: Option<toolbar::Toolbar>,
     pub hwnd: HWND,
@@ -104,6 +110,8 @@ impl Overlay {
             filled: false,
             round: false,
             draft: None,
+            selected: None,
+            ctrl_drag: None,
             bar: None,
             hwnd: HWND::default(),
             cancelled: false,
@@ -117,7 +125,8 @@ impl Overlay {
     fn create_window(hinstance: HINSTANCE) -> Result<HWND, String> {
         unsafe {
             let wc = WNDCLASSW {
-                style: CS_HREDRAW | CS_VREDRAW,
+                // CS_DBLCLKS：否则系统不会发 WM_LBUTTONDBLCLK（双击控制柄恢复直线，EDT-3）
+                style: CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
                 lpfnWndProc: Some(wndproc::wndproc),
                 hInstance: hinstance,
                 hCursor: cursor::create_cross_cursor(),

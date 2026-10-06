@@ -56,6 +56,7 @@ impl super::Overlay {
     /// 撤销（Ctrl+Z）。
     pub(super) fn on_undo(&mut self) {
         if self.doc.undo() {
+            self.selected = None; // 索引已变，控制柄不再对应
             self.repaint_after_history();
         }
     }
@@ -63,6 +64,7 @@ impl super::Overlay {
     /// 重做（Ctrl+Y / Ctrl+Shift+Z）。
     pub(super) fn on_redo(&mut self) {
         if self.doc.redo() {
+            self.selected = None;
             self.repaint_after_history();
         }
     }

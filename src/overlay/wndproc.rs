@@ -38,6 +38,13 @@ pub(super) unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARA
             overlay.on_cancel();
             LRESULT(0)
         }
+        // 双击控制柄恢复直线（EDT-3）
+        WM_LBUTTONDBLCLK => {
+            let x = (lparam.0 & 0xFFFF) as u16 as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
+            overlay.reset_curve_at(x, y);
+            LRESULT(0)
+        }
         // 主动绘制，不靠系统擦除；只重绘无效区域
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();

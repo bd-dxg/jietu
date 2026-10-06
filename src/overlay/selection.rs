@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! 选区更新与统一脏区重绘（CAP-2/3、PRD 6.3.2）：
-//! 底图复位 → 标注对象 → 选区装饰 → 工具栏，一次 `repaint` 完成并上屏。
+//! 底图复位 → 标注对象 → 选中箭头的控制柄 → 选区装饰 → 工具栏，一次 `repaint` 完成并上屏。
 
 use tiny_skia::{Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 use windows::Win32::Foundation::COLORREF;
@@ -11,12 +11,15 @@ use windows::Win32::Graphics::Gdi::{
 use super::geometry::{SelRect, expand_rect, intersect_rect, same_rect, text_rect, union_rect};
 use super::surface::{blit_region, restore_region};
 use super::toolbar;
+use crate::editor::{Kind, Object, Point};
 use crate::render;
 
 /// 脏区域外扩（覆盖边框、手柄与信息文字）。
-const DIRTY_PAD: i32 = 60;
+pub(super) const DIRTY_PAD: i32 = 60;
 /// 手柄边长。
 const HANDLE_SIZE: i32 = 7;
+/// 曲线控制柄半径（含描边，需 ≤ 对象包围盒的余量）。
+const CTRL_RADIUS: f32 = 4.5;
 const ACCENT: u8 = 26; // 主题蓝
 const ACCENT_G: u8 = 115;
 const ACCENT_B: u8 = 232;
@@ -87,6 +90,12 @@ impl super::Overlay {
             self.draft.as_ref(),
             (x0, y0, x1, y1),
         );
+        // 2b) 选中箭头的控制柄与虚线辅助线（EDT-3；仅屏幕显示，不进导出烘焙）
+        if let Some(obj) = self.selected_object().copied()
+            && render::intersects(&obj.bounds(), (x0, y0, x1, y1))
+        {
+            draw_curve_handles(&mut self.display, &obj);
+        }
         // 3) 选区边框与手柄（只在与选区装饰区域相交时重画）
         if let Some(sel) = self.selection {
             if intersect_rect(expand_rect(sel, DIRTY_PAD), region).is_some() {
@@ -134,6 +143,60 @@ impl super::Overlay {
             }
         }
     }
+}
+
+/// 选中箭头的控制柄（EDT-3）：控制点处画圆点，与端点之间用虚线辅助线连接。
+fn draw_curve_handles(pixmap: &mut Pixmap, obj: &Object) {
+    let (Some([c1, c2]), Kind::Arrow { from, to, .. }) = (obj.kind.control_points(), obj.kind) else {
+        return;
+    };
+    dashed_line(pixmap, from, c1);
+    dashed_line(pixmap, c2, to);
+    for p in [c1, c2] {
+        let mut pb = PathBuilder::new();
+        pb.push_circle(p.x, p.y, CTRL_RADIUS);
+        let Some(path) = pb.finish() else {
+            continue;
+        };
+        let mut fill = Paint::default();
+        fill.set_color_rgba8(255, 255, 255, 255);
+        pixmap.fill_path(&path, &fill, tiny_skia::FillRule::Winding, Transform::identity(), None);
+        let mut edge = Paint::default();
+        edge.set_color_rgba8(ACCENT, ACCENT_G, ACCENT_B, 255);
+        let stroke = Stroke {
+            width: 1.5,
+            ..Default::default()
+        };
+        pixmap.stroke_path(&path, &edge, &stroke, Transform::identity(), None);
+    }
+}
+
+/// 虚线辅助线（5px 实 / 4px 虚）：tiny-skia 无 dash，手动拆成小段。
+fn dashed_line(pixmap: &mut Pixmap, a: Point, b: Point) {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1.0 {
+        return;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let mut pb = PathBuilder::new();
+    let mut t = 0.0;
+    while t < len {
+        let end = (t + 5.0).min(len);
+        pb.move_to(a.x + ux * t, a.y + uy * t);
+        pb.line_to(a.x + ux * end, a.y + uy * end);
+        t += 9.0;
+    }
+    let Some(path) = pb.finish() else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(255, 255, 255, 200);
+    let stroke = Stroke {
+        width: 1.0,
+        ..Default::default()
+    };
+    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
 }
 
 /// 画选区边框。

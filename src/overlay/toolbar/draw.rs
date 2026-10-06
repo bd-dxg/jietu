@@ -99,10 +99,10 @@ fn rect_icon(r: SelRect, radius: f32, filled: bool, color: [u8; 4]) -> Object {
 fn arrow_icon(r: SelRect, color: [u8; 4]) -> Object {
     let inset = 5.0;
     Object {
-        kind: Kind::Arrow {
-            from: Point::new(r.x as f32 + inset, (r.y + r.h) as f32 - inset),
-            to: Point::new((r.x + r.w) as f32 - inset, r.y as f32 + inset),
-        },
+        kind: Kind::arrow(
+            Point::new(r.x as f32 + inset, (r.y + r.h) as f32 - inset),
+            Point::new((r.x + r.w) as f32 - inset, r.y as f32 + inset),
+        ),
         style: Style::new(color, 2.0),
     }
 }
