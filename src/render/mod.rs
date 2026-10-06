@@ -21,9 +21,24 @@ pub fn draw_objects(pixmap: &mut Pixmap, objects: &[Object], draft: Option<&Obje
 
 /// 绘制单个对象。
 pub fn draw_object(pixmap: &mut Pixmap, obj: &Object) {
+    draw_object_with(pixmap, obj, Transform::identity());
+}
+
+/// 绘制单个对象，并施加坐标系变换（导出烘焙时用于平移到裁剪图坐标）。
+pub fn draw_object_with(pixmap: &mut Pixmap, obj: &Object, transform: Transform) {
     match obj.kind {
-        Kind::Rect { a, b, radius, filled } => draw_rect(pixmap, a, b, radius, filled, &obj.style),
-        Kind::Arrow { from, to } => draw_arrow(pixmap, from, to, &obj.style),
+        Kind::Rect { a, b, radius, filled } => draw_rect(pixmap, a, b, radius, filled, &obj.style, transform),
+        Kind::Arrow { from, to } => draw_arrow(pixmap, from, to, &obj.style, transform),
+    }
+}
+
+/// 导出烘焙（OUT-1/OUT-2）：把标注对象栅格化进裁剪结果图。
+/// `origin` 是裁剪区域在覆盖层坐标系中的左上角；对象坐标减去它即为裁剪图坐标。
+/// 超出裁剪范围的对象由像素图边界自然裁掉。
+pub fn bake_objects(pixmap: &mut Pixmap, objects: &[Object], origin: (i32, i32)) {
+    let transform = Transform::from_translate(-origin.0 as f32, -origin.1 as f32);
+    for obj in objects {
+        draw_object_with(pixmap, obj, transform);
     }
 }
 
@@ -49,7 +64,7 @@ fn paint_of(color: [u8; 4]) -> Paint<'static> {
 }
 
 /// EDT-1 矩形：描边 + 可选填充、圆角、透明度（由颜色 alpha 控制）。
-fn draw_rect(pixmap: &mut Pixmap, a: Point, b: Point, radius: f32, filled: bool, style: &Style) {
+fn draw_rect(pixmap: &mut Pixmap, a: Point, b: Point, radius: f32, filled: bool, style: &Style, tr: Transform) {
     let (x0, y0) = (a.x.min(b.x), a.y.min(b.y));
     let (x1, y1) = (a.x.max(b.x), a.y.max(b.y));
     if x1 - x0 < 1.0 || y1 - y0 < 1.0 {
@@ -62,14 +77,14 @@ fn draw_rect(pixmap: &mut Pixmap, a: Point, b: Point, radius: f32, filled: bool,
 
     if filled {
         // 填充用半透明色（与描边同色），透明度由颜色 alpha 表达
-        pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+        pixmap.fill_path(&path, &paint, FillRule::Winding, tr, None);
         return;
     }
     let stroke = Stroke {
         width: style.width,
         ..Default::default()
     };
-    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    pixmap.stroke_path(&path, &paint, &stroke, tr, None);
 }
 
 /// 圆角矩形路径，圆角用三次贝塞尔近似圆弧；`radius <= 0.5` 时退化为直角矩形。
@@ -95,7 +110,7 @@ fn rounded_rect_path(x0: f32, y0: f32, x1: f32, y1: f32, radius: f32) -> Option<
 }
 
 /// EDT-2 直线箭头：头部大小随线宽缩放；线身在头部底边截断，避免粗线从箭尖穿出（EDT-3a）。
-fn draw_arrow(pixmap: &mut Pixmap, from: Point, to: Point, style: &Style) {
+fn draw_arrow(pixmap: &mut Pixmap, from: Point, to: Point, style: &Style, tr: Transform) {
     let (dx, dy) = (to.x - from.x, to.y - from.y);
     let len = (dx * dx + dy * dy).sqrt();
     if len < 0.5 {
@@ -118,7 +133,7 @@ fn draw_arrow(pixmap: &mut Pixmap, from: Point, to: Point, style: &Style) {
             line_cap: LineCap::Butt,
             ..Default::default()
         };
-        pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+        pixmap.stroke_path(&path, &paint, &stroke, tr, None);
     }
 
     // 箭头三角（填充），底边垂直于线身
@@ -129,7 +144,7 @@ fn draw_arrow(pixmap: &mut Pixmap, from: Point, to: Point, style: &Style) {
     tri.line_to(base.x - px * half, base.y - py * half);
     tri.close();
     if let Some(path) = tri.finish() {
-        pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+        pixmap.fill_path(&path, &paint, FillRule::Winding, tr, None);
     }
 }
 
@@ -235,6 +250,33 @@ mod tests {
 
         let a = alpha_at(&p, 60, 60);
         assert!((50..=70).contains(&a), "内部应为半透明填充，实际 alpha={a}");
+    }
+
+    #[test]
+    fn bake_translates_objects_into_crop_coordinates() {
+        let mut p = new_pixmap(300, 300);
+        let obj = Object {
+            kind: Kind::Rect {
+                a: Point::new(100.0, 100.0),
+                b: Point::new(160.0, 160.0),
+                radius: 0.0,
+                filled: false,
+            },
+            style: Style::new([255, 0, 0, 255], 4.0),
+        };
+        // 裁剪区域左上角在覆盖层坐标 (100,100)：对象边框应落在裁剪图坐标 0 附近
+        bake_objects(&mut p, &[obj], (100, 100));
+
+        assert!(alpha_at(&p, 1, 30) > 128, "左边框应平移到裁剪图 x≈0");
+        assert!(alpha_at(&p, 30, 1) > 128, "上边框应平移到裁剪图 y≈0");
+        assert_eq!(alpha_at(&p, 101, 101), 0, "原坐标处不应有像素");
+    }
+
+    #[test]
+    fn bake_draws_nothing_without_objects() {
+        let mut p = new_pixmap(20, 20);
+        bake_objects(&mut p, &[], (0, 0));
+        assert!(p.data().iter().all(|b| *b == 0));
     }
 
     #[test]
