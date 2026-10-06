@@ -12,7 +12,7 @@ use super::{
     toolbar, wide,
 };
 use crate::editor::{self, Style};
-use crate::output;
+use crate::{output, render};
 
 impl super::Overlay {
     /// 当前样式（EDT-7：颜色 + 线宽）。
@@ -87,10 +87,18 @@ impl super::Overlay {
         }
     }
 
+    /// 输出用像素图：裁剪选区 → 把标注对象烘焙进结果图（OUT-1/OUT-2）。
+    /// 标注坐标是覆盖层坐标系，需按裁剪原点平移到裁剪图坐标。
+    fn baked_selection(&self, sel: SelRect) -> Option<tiny_skia::Pixmap> {
+        let mut cropped = crop_pixmap(&self.original, sel)?;
+        render::bake_objects(&mut cropped, self.doc.objects(), (sel.x, sel.y));
+        Some(cropped)
+    }
+
     /// Enter / Ctrl+C：复制到剪贴板并关闭（OUT-1）。
     pub(super) fn on_copy(&mut self) {
         if let Some(sel) = self.selection {
-            let Some(cropped) = crop_pixmap(&self.original, sel) else {
+            let Some(cropped) = self.baked_selection(sel) else {
                 return;
             };
             std::thread::spawn(move || {
@@ -110,7 +118,7 @@ impl super::Overlay {
     /// Ctrl+S：保存 PNG 到默认目录并关闭（OUT-2）。
     pub(super) fn on_save(&mut self) {
         if let Some(sel) = self.selection {
-            let Some(cropped) = crop_pixmap(&self.original, sel) else {
+            let Some(cropped) = self.baked_selection(sel) else {
                 return;
             };
             std::thread::spawn(move || {
