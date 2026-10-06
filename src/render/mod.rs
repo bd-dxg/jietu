@@ -4,7 +4,10 @@
 
 use tiny_skia::{FillRule, LineCap, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
-use crate::editor::{Bounds, Kind, Object, Point, Style, arrow_head_len};
+use crate::editor::{
+    Bounds, Kind, Object, Point, Style, arrow_head_len, end_tangent, flatten, head_entry_t, polyline_len, split_left,
+    t_at_arc_from_end,
+};
 
 /// 像素区域（x0, y0, x1, y1 半开区间，物理像素）。
 pub type Clip = (i32, i32, i32, i32);
@@ -28,7 +31,7 @@ pub fn draw_object(pixmap: &mut Pixmap, obj: &Object) {
 pub fn draw_object_with(pixmap: &mut Pixmap, obj: &Object, transform: Transform) {
     match obj.kind {
         Kind::Rect { a, b, radius, filled } => draw_rect(pixmap, a, b, radius, filled, &obj.style, transform),
-        Kind::Arrow { from, to } => draw_arrow(pixmap, from, to, &obj.style, transform),
+        Kind::Arrow { from, c1, c2, to } => draw_arrow(pixmap, from, c1, c2, to, &obj.style, transform),
     }
 }
 
@@ -109,24 +112,29 @@ fn rounded_rect_path(x0: f32, y0: f32, x1: f32, y1: f32, radius: f32) -> Option<
     pb.finish()
 }
 
-/// EDT-2 直线箭头：头部大小随线宽缩放；线身在头部底边截断，避免粗线从箭尖穿出（EDT-3a）。
-fn draw_arrow(pixmap: &mut Pixmap, from: Point, to: Point, style: &Style, tr: Transform) {
-    let (dx, dy) = (to.x - from.x, to.y - from.y);
-    let len = (dx * dx + dy * dy).sqrt();
-    if len < 0.5 {
+/// EDT-2/EDT-3 箭头：线身沿三次贝塞尔曲线，头部沿终点切线方向；
+/// 线身在头部底边处按弧长截断，避免粗线从箭尖穿出（EDT-3a）。
+fn draw_arrow(pixmap: &mut Pixmap, from: Point, c1: Point, c2: Point, to: Point, style: &Style, tr: Transform) {
+    let pts = flatten(from, c1, c2, to);
+    let total = polyline_len(&pts);
+    if total < 0.5 {
         return;
     }
-    let (ux, uy) = (dx / len, dy / len);
-    let head = arrow_head_len(style.width).min(len);
+    let (ux, uy) = unit_dir(c1, c2, to, &pts);
+    let head = arrow_head_len(style.width).min(total);
     let half = head * 0.45;
     let base = Point::new(to.x - ux * head, to.y - uy * head);
     let paint = paint_of(style.color);
 
-    // 线身：尾 → 头部底边（底边处多画半个线宽，避免抗锯齿缝隙）
-    let line_end = Point::new(base.x + ux * style.width * 0.5, base.y + uy * style.width * 0.5);
+    // 线身：截断在头部三角的边界（底边或侧边）上，避免弯曲时与头部脱开或穿出三角侧面（EDT-3a）；
+    // 再多画 0.5px 深入三角形内，消除接缝处的抗锯齿裂缝。
+    let t0 =
+        head_entry_t(from, c1, c2, to, base, (ux, uy), head, half).unwrap_or_else(|| t_at_arc_from_end(&pts, head));
+    let seg = split_left(from, c1, c2, to, t0);
+    let line_end = Point::new(seg[3].x + ux * 0.5, seg[3].y + uy * 0.5);
     let mut line = PathBuilder::new();
     line.move_to(from.x, from.y);
-    line.line_to(line_end.x, line_end.y);
+    line.cubic_to(seg[1].x, seg[1].y, seg[2].x, seg[2].y, line_end.x, line_end.y);
     if let Some(path) = line.finish() {
         let stroke = Stroke {
             width: style.width,
@@ -136,7 +144,7 @@ fn draw_arrow(pixmap: &mut Pixmap, from: Point, to: Point, style: &Style, tr: Tr
         pixmap.stroke_path(&path, &paint, &stroke, tr, None);
     }
 
-    // 箭头三角（填充），底边垂直于线身
+    // 箭头三角（填充），底边垂直于终点切线
     let (px, py) = (-uy, ux);
     let mut tri = PathBuilder::new();
     tri.move_to(to.x, to.y);
@@ -146,6 +154,21 @@ fn draw_arrow(pixmap: &mut Pixmap, from: Point, to: Point, style: &Style, tr: Tr
     if let Some(path) = tri.finish() {
         pixmap.fill_path(&path, &paint, FillRule::Winding, tr, None);
     }
+}
+
+/// 终点切线方向的单位向量（EDT-3：P3−P2，退化时回退 P3−P1 或折线末段）。
+fn unit_dir(c1: Point, c2: Point, to: Point, pts: &[Point]) -> (f32, f32) {
+    let t = end_tangent(c1, c2, to);
+    if let Some(u) = normalize(t.x, t.y) {
+        return u;
+    }
+    let prev = pts[pts.len() - 2];
+    normalize(to.x - prev.x, to.y - prev.y).unwrap_or((1.0, 0.0))
+}
+
+fn normalize(x: f32, y: f32) -> Option<(f32, f32)> {
+    let len = (x * x + y * y).sqrt();
+    if len < 1e-6 { None } else { Some((x / len, y / len)) }
 }
 
 #[cfg(test)]
@@ -167,10 +190,7 @@ mod tests {
     fn arrow_line_is_drawn_between_endpoints() {
         let mut p = new_pixmap(200, 60);
         let obj = Object {
-            kind: Kind::Arrow {
-                from: Point::new(10.0, 30.0),
-                to: Point::new(180.0, 30.0),
-            },
+            kind: Kind::arrow(Point::new(10.0, 30.0), Point::new(180.0, 30.0)),
             style: Style::new([255, 0, 0, 255], 4.0),
         };
         draw_object(&mut p, &obj);
@@ -190,10 +210,7 @@ mod tests {
         let mut thin = new_pixmap(200, 120);
         let mut thick = new_pixmap(200, 120);
         let mk = |w: f32| Object {
-            kind: Kind::Arrow {
-                from: Point::new(10.0, 60.0),
-                to: Point::new(180.0, 60.0),
-            },
+            kind: Kind::arrow(Point::new(10.0, 60.0), Point::new(180.0, 60.0)),
             style: Style::new([0, 0, 0, 255], w),
         };
         draw_object(&mut thin, &mk(2.0));
@@ -277,6 +294,48 @@ mod tests {
         let mut p = new_pixmap(20, 20);
         bake_objects(&mut p, &[], (0, 0));
         assert!(p.data().iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn curved_arrow_follows_control_points() {
+        let mut p = new_pixmap(200, 200);
+        let obj = Object {
+            // 起点 (20,180) → 终点 (180,180)，控制点抬到 y=40：曲线应向上拱起
+            kind: Kind::Arrow {
+                from: Point::new(20.0, 180.0),
+                c1: Point::new(20.0, 40.0),
+                c2: Point::new(180.0, 40.0),
+                to: Point::new(180.0, 180.0),
+            },
+            style: Style::new([255, 0, 0, 255], 3.0),
+        };
+        draw_object(&mut p, &obj);
+
+        // 三次贝塞尔在 t=0.5 处为 (100, 75)
+        assert!(alpha_at(&p, 100, 75) > 128, "曲线中段应经过 (100,75)");
+        assert_eq!(alpha_at(&p, 100, 180), 0, "两点连线上不应有像素");
+        // 箭尖是个尖点（零面积），取头部内部靠后的位置校验
+        assert!(alpha_at(&p, 180, 172) > 128, "头部内部应有像素");
+    }
+
+    #[test]
+    fn curve_head_points_along_end_tangent() {
+        // 终点切线 ≈ P3−P2 = (10,−90)（几乎竖直向上）：头部应向上展开，不向左侧展开
+        let mut p = new_pixmap(200, 200);
+        let obj = Object {
+            kind: Kind::Arrow {
+                from: Point::new(40.0, 40.0),
+                c1: Point::new(40.0, 140.0),
+                c2: Point::new(150.0, 150.0),
+                to: Point::new(160.0, 60.0),
+            },
+            style: Style::new([0, 0, 0, 255], 4.0),
+        };
+        draw_object(&mut p, &obj);
+
+        assert!(alpha_at(&p, 96, 121) > 128, "线身应经过 t=0.5 处 (96,121)");
+        assert!(alpha_at(&p, 159, 66) > 128, "头部应沿切线（向上）展开");
+        assert_eq!(alpha_at(&p, 152, 60), 0, "头部不应沿水平方向展开");
     }
 
     #[test]

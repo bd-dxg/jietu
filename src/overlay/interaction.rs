@@ -1,28 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! 鼠标与绘制交互（CAP-2、EDT-1/2/7）：框选、八向缩放、空格移动选区、选区内绘制标注。
+//! 鼠标与绘制交互（CAP-2、EDT-1/2/3/7）：框选、八向缩放、空格移动选区、选区内绘制标注。
+//! 手柄/对象命中判定与选中状态见 `pick`。
 
 use crate::editor::{Kind, Object, Point, Tool};
 use crate::render;
 
 use super::geometry::{SelRect, expand_rect, union_rect};
+use super::pick::{Handle, hit_handle, is_degenerate};
 use super::wndproc::space_down;
-
-/// 手柄命中半径。
-const PICK_RADIUS: i32 = 6;
-
-/// 手柄类型（八向 + 移动）。
-#[derive(Clone, Copy, PartialEq)]
-pub(super) enum Handle {
-    N,
-    S,
-    E,
-    W,
-    NE,
-    NW,
-    SE,
-    SW,
-    Move,
-}
 
 /// 交互阶段。
 #[derive(Clone, Copy, PartialEq)]
@@ -59,6 +44,11 @@ impl super::Overlay {
         let new = match self.selection {
             None => Some(self.begin_select(x, y)),
             Some(sel) => {
+                // 控制柄优先于缩放/绘制（EDT-3）：它可能落在对象描边上
+                if let Some(index) = self.hit_control(x, y) {
+                    self.begin_control_drag(index);
+                    return;
+                }
                 if let Some(handle) = hit_handle(sel, x, y) {
                     self.drag = Some(Drag {
                         handle,
@@ -79,13 +69,19 @@ impl super::Overlay {
                         });
                         self.phase = Phase::Adjusting;
                         Some(sel)
+                    } else if let Some(i) = self.hit_object(x, y) {
+                        // 点在已有对象上：选中它（EDT-7），不新建
+                        self.set_selected(Some(i));
+                        return;
                     } else {
-                        // 选区内按下：用当前工具绘制标注（EDT-1/EDT-2）
+                        // 空白处按下：用当前工具绘制标注（EDT-1/EDT-2/EDT-3）
+                        self.set_selected(None);
                         self.start_draw(x, y);
                         return;
                     }
                 } else {
-                    // 远处点击：开始新选区
+                    // 远处点击：开始新选区，并取消选中
+                    self.set_selected(None);
                     Some(self.begin_select(x, y))
                 }
             }
@@ -94,6 +90,11 @@ impl super::Overlay {
     }
 
     pub(super) fn on_mouse_move(&mut self, x: i32, y: i32) {
+        // 拖动曲线控制柄（EDT-3）
+        if self.ctrl_drag.is_some() {
+            self.drag_control(x, y);
+            return;
+        }
         // 绘制中：草稿终点跟随鼠标（限制在选区内）
         if self.draft.is_some() {
             let Some(sel) = self.selection else {
@@ -103,16 +104,17 @@ impl super::Overlay {
             let cy = y.clamp(sel.y, (sel.y + sel.h - 1).max(sel.y));
             let before = self.draft_region();
             if let Some(draft) = self.draft.as_mut() {
-                match &mut draft.kind {
-                    Kind::Rect { b, .. } => {
-                        b.x = cx as f32;
-                        b.y = cy as f32;
-                    }
-                    Kind::Arrow { to, .. } => {
-                        to.x = cx as f32;
-                        to.y = cy as f32;
-                    }
-                }
+                let end = Point::new(cx as f32, cy as f32);
+                draft.kind = match draft.kind {
+                    Kind::Rect { a, radius, filled, .. } => Kind::Rect {
+                        a,
+                        b: end,
+                        radius,
+                        filled,
+                    },
+                    // 拖动中重建箭头：控制点保持在 1/3、2/3 处（EDT-3 从直线开始）
+                    Kind::Arrow { from, .. } => Kind::arrow(from, end),
+                };
             }
             if let Some(d) = union_rect(before, self.draft_region()) {
                 self.repaint(expand_rect(d, 2));
@@ -171,11 +173,18 @@ impl super::Overlay {
     }
 
     pub(super) fn on_lbutton_up(&mut self) {
+        // 结束控制柄拖动（EDT-3）
+        if self.ctrl_drag.is_some() {
+            self.end_control_drag();
+            return;
+        }
         // 结束绘制：过短视为误触，丢弃；提交后进入撤销栈
         if let Some(draft) = self.draft.take() {
             let kept = !is_degenerate(&draft);
             if kept {
                 self.doc.push(draft);
+                // 新建的箭头随即选中，控制柄落在 1/3、2/3 处（EDT-3）
+                self.selected = Some(self.doc.objects().len() - 1);
             }
             self.doc.commit(kept);
             let c = render::bounds_to_clip(&draft.bounds());
@@ -228,7 +237,7 @@ impl super::Overlay {
                 radius: if self.round { 12.0 } else { 0.0 },
                 filled: self.filled,
             },
-            Tool::Arrow => Kind::Arrow { from: p, to: p },
+            Tool::Arrow => Kind::arrow(p, p),
         };
         self.doc.begin();
         self.draft = Some(Object {
@@ -246,35 +255,5 @@ impl super::Overlay {
             w: c.2 - c.0,
             h: c.3 - c.1,
         })
-    }
-}
-
-/// 命中检测：返回落在哪个手柄/移动区域。
-fn hit_handle(sel: SelRect, x: i32, y: i32) -> Option<Handle> {
-    let (x0, y0, x1, y1) = (sel.x, sel.y, sel.x + sel.w, sel.y + sel.h);
-    let cx = x0 + sel.w / 2;
-    let cy = y0 + sel.h / 2;
-    for (hx, hy, h) in [
-        (x0, y0, Handle::NW),
-        (cx, y0, Handle::N),
-        (x1, y0, Handle::NE),
-        (x0, cy, Handle::W),
-        (x1, cy, Handle::E),
-        (x0, y1, Handle::SW),
-        (cx, y1, Handle::S),
-        (x1, y1, Handle::SE),
-    ] {
-        if (x - hx).abs() <= PICK_RADIUS && (y - hy).abs() <= PICK_RADIUS {
-            return Some(h);
-        }
-    }
-    None
-}
-
-/// 误触判定：长宽均不足 2px 的对象丢弃（EDT-1/EDT-2）。
-fn is_degenerate(obj: &Object) -> bool {
-    match obj.kind {
-        Kind::Rect { a, b, .. } => (a.x - b.x).abs() < 2.0 && (a.y - b.y).abs() < 2.0,
-        Kind::Arrow { from, to } => (from.x - to.x).abs() < 2.0 && (from.y - to.y).abs() < 2.0,
     }
 }
