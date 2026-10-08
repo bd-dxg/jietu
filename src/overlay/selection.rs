@@ -10,7 +10,7 @@ use windows::Win32::Graphics::Gdi::{
 
 use super::geometry::{SelRect, expand_rect, intersect_rect, same_rect, text_rect, union_rect};
 use super::surface::{blit_region, restore_region};
-use super::toolbar;
+use super::{textinput, toolbar};
 use crate::editor::{Kind, Object, Point};
 use crate::render;
 
@@ -83,18 +83,25 @@ impl super::Overlay {
                 blit_region(&mut self.display, &self.original, overlap);
             }
         }
-        // 2) 标注对象（含正在拖拽的草稿）
+        // 2) 标注对象（含正在拖拽的草稿）；二次编辑中的文本对象隐藏，由输入框呈现（EDT-4）
         render::draw_objects(
             &mut self.display,
             self.doc.objects(),
             self.draft.as_ref(),
+            self.text_edit.as_ref().and_then(|e| e.obj_index),
             (x0, y0, x1, y1),
         );
         // 2b) 选中箭头的控制柄与虚线辅助线（EDT-3；仅屏幕显示，不进导出烘焙）
-        if let Some(obj) = self.selected_object().copied()
+        if let Some(obj) = self.selected_object().cloned()
             && render::intersects(&obj.bounds(), (x0, y0, x1, y1))
         {
             draw_curve_handles(&mut self.display, &obj);
+        }
+        // 2c) 文本输入框（EDT-4；仅屏幕显示，提交后为对象）
+        if let Some(edit) = &self.text_edit {
+            if intersect_rect(expand_rect(edit.region(), 2), region).is_some() {
+                textinput::draw_edit(&mut self.display, edit, crate::editor::PALETTE[self.color_index]);
+            }
         }
         // 3) 选区边框与手柄（只在与选区装饰区域相交时重画）
         if let Some(sel) = self.selection {
@@ -147,11 +154,12 @@ impl super::Overlay {
 
 /// 选中箭头的控制柄（EDT-3）：控制点处画圆点，与端点之间用虚线辅助线连接。
 fn draw_curve_handles(pixmap: &mut Pixmap, obj: &Object) {
-    let (Some([c1, c2]), Kind::Arrow { from, to, .. }) = (obj.kind.control_points(), obj.kind) else {
+    let (Some(cps), Kind::Arrow { from, to, .. }) = (obj.kind.control_points(), &obj.kind) else {
         return;
     };
-    dashed_line(pixmap, from, c1);
-    dashed_line(pixmap, c2, to);
+    let [c1, c2] = cps;
+    dashed_line(pixmap, *from, c1);
+    dashed_line(pixmap, c2, *to);
     for p in [c1, c2] {
         let mut pb = PathBuilder::new();
         pb.push_circle(p.x, p.y, CTRL_RADIUS);

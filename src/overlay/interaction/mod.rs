@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! 鼠标与绘制交互（CAP-2、EDT-1/2/3/7）：框选、八向缩放、空格移动选区、选区内绘制标注。
-//! 手柄/对象命中判定与选中状态见 `pick`。
+//! 手柄/对象命中判定与选中状态见 `pick`；文本对象拖动见 `move_obj`，绘制草稿见 `draft`。
 
-use crate::editor::{Kind, Object, Point, Tool};
-use crate::render;
+mod draft;
+mod move_obj;
 
-use super::geometry::{SelRect, expand_rect, union_rect};
-use super::pick::{Handle, hit_handle, is_degenerate};
+use crate::editor::{Kind, Point};
+
+use super::geometry::SelRect;
+use super::pick::{Handle, hit_handle};
 use super::wndproc::space_down;
 
 /// 交互阶段。
@@ -27,6 +29,8 @@ pub(super) struct Drag {
     /// 按下时的鼠标位置。
     px: i32,
     py: i32,
+    /// Handle::MoveObj：按下命中的对象索引与按下时的位置（EDT-4）。
+    obj: Option<(usize, Point)>,
 }
 
 impl super::Overlay {
@@ -40,6 +44,10 @@ impl super::Overlay {
                 }
                 return;
             }
+        }
+        // 文本输入中：任何左键先提交当前输入（EDT-4），再按常规流程（Text 工具点击空白会开启新输入）
+        if self.text_edit.is_some() {
+            self.commit_text();
         }
         let new = match self.selection {
             None => Some(self.begin_select(x, y)),
@@ -55,6 +63,7 @@ impl super::Overlay {
                         orig: sel,
                         px: x,
                         py: y,
+                        obj: None,
                     });
                     self.phase = Phase::Adjusting;
                     Some(sel)
@@ -66,11 +75,21 @@ impl super::Overlay {
                             orig: sel,
                             px: x,
                             py: y,
+                            obj: None,
                         });
                         self.phase = Phase::Adjusting;
                         Some(sel)
                     } else if let Some(i) = self.hit_object(x, y) {
-                        // 点在已有对象上：选中它（EDT-7），不新建
+                        // 文本对象：按下即进入拖拽移动（无位移退化为单击选中，双击仍进编辑，EDT-4）
+                        let pos = match &self.doc.objects()[i].kind {
+                            Kind::Text { pos, .. } => Some(*pos),
+                            _ => None,
+                        };
+                        if let Some(pos) = pos {
+                            self.begin_object_move(i, sel, x, y, pos);
+                            return;
+                        }
+                        // 其它对象：仅选中（EDT-7），不新建
                         self.set_selected(Some(i));
                         return;
                     } else {
@@ -97,31 +116,7 @@ impl super::Overlay {
         }
         // 绘制中：草稿终点跟随鼠标（限制在选区内）
         if self.draft.is_some() {
-            let Some(sel) = self.selection else {
-                return;
-            };
-            let cx = x.clamp(sel.x, (sel.x + sel.w - 1).max(sel.x));
-            let cy = y.clamp(sel.y, (sel.y + sel.h - 1).max(sel.y));
-            let before = self.draft_region();
-            if let Some(draft) = self.draft.as_mut() {
-                let end = Point::new(cx as f32, cy as f32);
-                draft.kind = match draft.kind {
-                    Kind::Rect { a, radius, filled, .. } => Kind::Rect {
-                        a,
-                        b: end,
-                        radius,
-                        filled,
-                    },
-                    // 拖动中重建箭头：控制点保持在 1/3、2/3 处（EDT-3 从直线开始）
-                    Kind::Arrow { from, .. } => Kind::arrow(from, end),
-                    // 区域类（高亮/模糊）：只更新对角点，半径/样式不变
-                    Kind::Highlight { a, .. } => Kind::Highlight { a, b: end },
-                    Kind::Blur { a, radius, .. } => Kind::Blur { a, b: end, radius },
-                };
-            }
-            if let Some(d) = union_rect(before, self.draft_region()) {
-                self.repaint(expand_rect(d, 2));
-            }
+            self.update_draft(x, y);
             return;
         }
         let Some(drag) = &self.drag else {
@@ -130,12 +125,19 @@ impl super::Overlay {
         let (dx, dy) = (x - drag.px, y - drag.py);
         let handle = drag.handle;
         let orig = drag.orig;
+        let obj = drag.obj;
         let phase = self.phase;
         let (vw, vh) = (self.display.width() as i32, self.display.height() as i32);
         let max_x = vw.saturating_sub(1);
         let max_y = vh.saturating_sub(1);
         let x = x.clamp(0, max_x);
         let y = y.clamp(0, max_y);
+
+        // 拖动文本对象（EDT-4）
+        if let Some((i, orig_pos)) = obj {
+            self.drag_object(i, orig_pos, dx, dy);
+            return;
+        }
 
         let new = if phase == Phase::Selecting {
             // 框选阶段：以按下点为锚点拉伸矩形
@@ -170,6 +172,8 @@ impl super::Overlay {
                 Handle::NW => SelRect::normalized(x, y, orig.x + orig.w, orig.y + orig.h),
                 Handle::SE => SelRect::normalized(orig.x, orig.y, x.max(orig.x + 1), y.max(orig.y + 1)),
                 Handle::SW => SelRect::normalized(x, orig.y, orig.x + orig.w, orig.y + orig.h),
+                // 对象移动已在上方提前返回，此处只做模式穷尽
+                Handle::MoveObj => return,
             }
         };
         self.set_selection(Some(new));
@@ -181,27 +185,16 @@ impl super::Overlay {
             self.end_control_drag();
             return;
         }
+        // 结束文本对象拖动（EDT-4）：无位移视为单击（仅选中），不进撤销栈
+        if let Some(d) = self.drag
+            && d.handle == Handle::MoveObj
+        {
+            self.end_object_move();
+            return;
+        }
         // 结束绘制：过短视为误触，丢弃；提交后进入撤销栈
-        if let Some(draft) = self.draft.take() {
-            let kept = !is_degenerate(&draft);
-            if kept {
-                self.doc.push(draft);
-                // 新建的箭头随即选中，控制柄落在 1/3、2/3 处（EDT-3）
-                self.selected = Some(self.doc.objects().len() - 1);
-            }
-            self.doc.commit(kept);
-            let c = render::bounds_to_clip(&draft.bounds());
-            let mut region = SelRect {
-                x: c.0,
-                y: c.1,
-                w: c.2 - c.0,
-                h: c.3 - c.1,
-            };
-            if let Some(bar) = self.bar.as_ref() {
-                // 撤销/重做按钮的可用性随之变化
-                region = union_rect(Some(region), Some(expand_rect(bar.rect, 2))).unwrap_or(region);
-            }
-            self.repaint(expand_rect(region, 2));
+        if self.draft.is_some() {
+            self.commit_draft();
             return;
         }
         self.drag = None;
@@ -226,43 +219,8 @@ impl super::Overlay {
             orig: sel,
             px: x,
             py: y,
+            obj: None,
         });
         sel
-    }
-
-    /// 在选区内开始拖拽绘制标注（EDT-1/EDT-2）。
-    fn start_draw(&mut self, x: i32, y: i32) {
-        let p = Point::new(x as f32, y as f32);
-        let kind = match self.tool {
-            Tool::Rect => Kind::Rect {
-                a: p,
-                b: p,
-                radius: if self.round { 12.0 } else { 0.0 },
-                filled: self.filled,
-            },
-            Tool::Arrow => Kind::arrow(p, p),
-            Tool::Highlight => Kind::Highlight { a: p, b: p },
-            Tool::Blur => Kind::Blur {
-                a: p,
-                b: p,
-                radius: self.blur_radius,
-            },
-        };
-        self.doc.begin();
-        self.draft = Some(Object {
-            kind,
-            style: self.current_style(),
-        });
-    }
-
-    /// 草稿对象当前占据的像素区域。
-    fn draft_region(&self) -> Option<SelRect> {
-        let c = render::bounds_to_clip(&self.draft.as_ref()?.bounds());
-        Some(SelRect {
-            x: c.0,
-            y: c.1,
-            w: c.2 - c.0,
-            h: c.3 - c.1,
-        })
     }
 }

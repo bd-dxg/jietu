@@ -46,11 +46,17 @@ pub(super) unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARA
             overlay.on_cancel();
             LRESULT(0)
         }
-        // 双击控制柄恢复直线（EDT-3）
+        // 双击控制柄恢复直线（EDT-3）；双击文本对象进入再编辑（EDT-4）
         WM_LBUTTONDBLCLK => {
             let x = (lparam.0 & 0xFFFF) as u16 as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
-            overlay.reset_curve_at(x, y);
+            let edited = overlay
+                .hit_object(x, y)
+                .map(|i| overlay.begin_edit_text(i))
+                .unwrap_or(false);
+            if !edited {
+                overlay.reset_curve_at(x, y);
+            }
             LRESULT(0)
         }
         // 主动绘制，不靠系统擦除；只重绘无效区域
@@ -86,6 +92,12 @@ pub(super) unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARA
             LRESULT(1)
         }
         WM_KEYDOWN => {
+            // 文本输入中：只处理输入相关按键（光标移动/退格/Enter 提交/Esc 取消），
+            // 拦截全局快捷键与空格抓手切换（空格作为普通字符经 WM_CHAR 进入文本）
+            if overlay.is_editing_text() {
+                overlay.on_text_key(wparam.0 as u32, shift_down(), ctrl_down());
+                return LRESULT(0);
+            }
             // 空格按下立即切抓手光标：系统只在鼠标移动时发 WM_SETCURSOR，不能等它
             if wparam.0 as u32 == 0x20 {
                 apply_cursor(hwnd, true);
@@ -106,6 +118,27 @@ pub(super) unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARA
                 }
                 0x59 if ctrl_down() => overlay.on_redo(), // Ctrl+Y
                 _ => {}
+            }
+            LRESULT(0)
+        }
+        // 文本字符（EDT-4）：普通字符经 TranslateMessage 转 WM_CHAR；IME 候选经组合消息
+        WM_CHAR => {
+            if overlay.is_editing_text() {
+                overlay.on_text_char(wparam.0 as u16);
+            }
+            LRESULT(0)
+        }
+        // 中文 IME（EDT-4）：组合开始无需处理；组合更新读取候选/结果；结束清空候选
+        WM_IME_STARTCOMPOSITION => LRESULT(0),
+        WM_IME_COMPOSITION => {
+            if overlay.is_editing_text() {
+                overlay.on_text_composition(lparam.0 as u32);
+            }
+            LRESULT(0)
+        }
+        WM_IME_ENDCOMPOSITION => {
+            if overlay.is_editing_text() {
+                overlay.on_text_composition_end();
             }
             LRESULT(0)
         }
