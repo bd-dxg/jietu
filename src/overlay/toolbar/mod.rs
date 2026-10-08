@@ -2,6 +2,7 @@
 //! 覆盖层工具栏（EDT-7）：布局与命中测试；绘制见 `draw` 子模块。
 
 mod draw;
+mod icons;
 
 use tiny_skia::Pixmap;
 
@@ -191,13 +192,14 @@ mod tests {
         let center = |offset: i32| bar.hit(bar.rect.x + offset, y);
         assert_eq!(center(18), Some(Action::Tool(Tool::Rect)));
         assert_eq!(center(48), Some(Action::Tool(Tool::Arrow)));
-        assert_eq!(center(78), Some(Action::Tool(Tool::Highlight)));
-        assert_eq!(center(108), Some(Action::Tool(Tool::Blur)));
-        assert_eq!(center(141), Some(Action::Color(0)));
-        assert_eq!(center(167), Some(Action::Color(1)));
-        assert_eq!(center(278), Some(Action::ToggleFill));
-        assert_eq!(center(308), Some(Action::ToggleRound));
-        assert_eq!(center(343), Some(Action::Undo));
-        assert_eq!(center(373), Some(Action::Redo));
+        assert_eq!(center(78), Some(Action::Tool(Tool::Text)));
+        assert_eq!(center(108), Some(Action::Tool(Tool::Highlight)));
+        assert_eq!(center(138), Some(Action::Tool(Tool::Blur)));
+        assert_eq!(center(171), Some(Action::Color(0)));
+        assert_eq!(center(197), Some(Action::Color(1)));
+        assert_eq!(center(295), Some(Action::ToggleFill));
+        assert_eq!(center(325), Some(Action::ToggleRound));
+        assert_eq!(center(373), Some(Action::Undo));
+        assert_eq!(center(403), Some(Action::Redo));
     }
 }

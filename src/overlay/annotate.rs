@@ -36,8 +36,18 @@ impl super::Overlay {
         match action {
             toolbar::Action::Tool(t) => self.tool = t,
             toolbar::Action::Color(i) => self.color_index = i,
-            toolbar::Action::ToggleFill => self.filled = !self.filled,
-            toolbar::Action::ToggleRound => self.round = !self.round,
+            toolbar::Action::ToggleFill => {
+                // 文本工具无背景功能：填充开关仅对矩形有效，文本下忽略
+                if self.tool != crate::editor::Tool::Text {
+                    self.filled = !self.filled;
+                }
+            }
+            // 圆角开关仅对矩形有效（EDT-4 文本工具下点击无效果）
+            toolbar::Action::ToggleRound => {
+                if self.tool != crate::editor::Tool::Text {
+                    self.round = !self.round;
+                }
+            }
             toolbar::Action::Undo => return self.on_undo(),
             toolbar::Action::Redo => return self.on_redo(),
         }

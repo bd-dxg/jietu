@@ -4,12 +4,15 @@
 //! 坐标统一为覆盖层坐标系下的物理像素。
 
 mod curve;
+mod document;
 mod hit;
+pub(crate) mod text;
 
 pub use curve::{
     SEGMENTS as CURVE_SEGMENTS, dist_to_polyline, end_tangent, flatten, head_entry_t, point_at, polyline_len,
     split_left, t_at_arc_from_end,
 };
+pub use document::{Document, MAX_HISTORY};
 
 /// 坐标点。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -59,8 +62,8 @@ impl Style {
     }
 }
 
-/// 对象几何（EDT-1 矩形 / EDT-2 直线箭头 / EDT-3 曲线箭头 / EDT-5 模糊 / EDT-6 高亮）。
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// 对象几何（EDT-1 矩形 / EDT-2 直线箭头 / EDT-3 曲线箭头 / EDT-4 文本 / EDT-5 模糊 / EDT-6 高亮）。
+#[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
     /// EDT-1 矩形：对角两点；`radius` 圆角半径；`filled` 是否填充（描边始终绘制）。
     Rect {
@@ -75,6 +78,14 @@ pub enum Kind {
         c1: Point,
         c2: Point,
         to: Point,
+    },
+    /// EDT-4 文本：`pos` 为文字左上角；`text` 为内容（共享字符串，保持对象 Clone）；
+    /// `font_size` 字号（物理像素）；`size` 为测量缓存（文字宽高，不含内边距），由渲染层测量后写入。
+    Text {
+        pos: Point,
+        text: std::sync::Arc<str>,
+        font_size: f32,
+        size: (f32, f32),
     },
     /// EDT-6 高亮：对角两点，荧光笔效果（半透明色块 + Multiply 混合，不遮挡文字）。
     Highlight { a: Point, b: Point },
@@ -97,7 +108,7 @@ impl Kind {
     pub fn control_points(&self) -> Option<[Point; 2]> {
         match *self {
             Kind::Arrow { c1, c2, .. } => Some([c1, c2]),
-            Kind::Rect { .. } | Kind::Highlight { .. } | Kind::Blur { .. } => None,
+            Kind::Rect { .. } | Kind::Text { .. } | Kind::Highlight { .. } | Kind::Blur { .. } => None,
         }
     }
 
@@ -113,11 +124,11 @@ impl Kind {
 
     /// 双击控制柄恢复直线（EDT-3）；返回是否发生变化。
     pub fn reset_curve(&mut self) -> bool {
-        let Kind::Arrow { from, to, .. } = *self else {
+        let Kind::Arrow { from, to, .. } = self else {
             return false;
         };
-        let straight = Kind::arrow(from, to);
-        if straight == *self {
+        let straight = Kind::arrow(*from, *to);
+        if &straight == self {
             return false;
         }
         *self = straight;
@@ -127,18 +138,22 @@ impl Kind {
     /// 几何包围盒，含线宽一半与箭头头部的余量（供脏区计算使用）。
     pub fn bounds(&self, style: &Style) -> Bounds {
         let half = style.width * 0.5 + 1.0;
-        match *self {
+        match self {
             Kind::Rect { a, b, .. } => Bounds::around(a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y), half),
             Kind::Arrow { from, c1, c2, to } => {
                 // 曲线必落在控制点凸包内，故取凸包包围盒（精确上界）再补头部尺寸
                 let pad = half.max(arrow_head_len(style.width) * 0.5);
-                let (x0, y0, x1, y1) = curve::hull_bounds(from, c1, c2, to);
+                let (x0, y0, x1, y1) = curve::hull_bounds(*from, *c1, *c2, *to);
                 Bounds::around(x0, y0, x1, y1, pad)
             }
             // 区域类（高亮/模糊）：整块都是绘制内容，外扩 1px 保证脏区取整
             Kind::Highlight { a, b } | Kind::Blur { a, b, .. } => {
                 Bounds::around(a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y), 1.0)
             }
+            // 文本：范围由测量缓存决定（EDT-4），padding 随字号缩放
+            Kind::Text {
+                pos, size, font_size, ..
+            } => text::bounds(*pos, *size, *font_size),
         }
     }
 }
@@ -153,7 +168,7 @@ pub fn arrow_head_len(width: f32) -> f32 {
 }
 
 /// 一个标注对象。
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Object {
     pub kind: Kind,
     pub style: Style,
@@ -170,18 +185,20 @@ impl Object {
     }
 }
 
-/// 当前绘制工具（EDT-1/EDT-2/EDT-5/EDT-6）。
+/// 当前绘制工具（EDT-1/EDT-2/EDT-4/EDT-5/EDT-6）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
     Rect,
     Arrow,
+    /// EDT-4 文本：点击放置，输入后提交。
+    Text,
     Highlight,
     Blur,
 }
 
 impl Tool {
     /// 工具栏顺序。
-    pub const ALL: [Tool; 4] = [Tool::Rect, Tool::Arrow, Tool::Highlight, Tool::Blur];
+    pub const ALL: [Tool; 5] = [Tool::Rect, Tool::Arrow, Tool::Text, Tool::Highlight, Tool::Blur];
 }
 
 /// 新建对象默认线宽（物理像素，连续可调：滚轮 / 二级工具栏）。
@@ -189,6 +206,9 @@ pub const DEFAULT_LINE_WIDTH: f32 = 4.0;
 
 /// 模糊默认强度（EDT-5：半径，连续可调）。
 pub const DEFAULT_BLUR_RADIUS: f32 = 16.0;
+
+/// 文本默认字号（EDT-4：物理像素，滚轮连续可调）。
+pub const DEFAULT_FONT_SIZE: f32 = 24.0;
 
 /// 颜色调色板（RGBA）。透明度由工具栏后续提供，当前固定 255。
 pub const PALETTE: [[u8; 4]; 5] = [
@@ -198,98 +218,6 @@ pub const PALETTE: [[u8; 4]; 5] = [
     [67, 160, 71, 255],
     [30, 136, 229, 255],
 ];
-
-/// 撤销栈深度上限，防止长时间标注累积内存。
-const MAX_HISTORY: usize = 100;
-
-/// 编辑文档：对象列表 + 快照式撤销/重做。
-///
-/// 快照式（每次编辑保存整份对象列表）而非逆操作命令：
-/// 对象数量少（每个 40 字节左右），快照成本可忽略，且不会出现逆操作实现的隐蔽错误。
-#[derive(Default)]
-pub struct Document {
-    objects: Vec<Object>,
-    undo: Vec<Vec<Object>>,
-    redo: Vec<Vec<Object>>,
-    /// `begin` 记录的快照，`commit` 时归档。
-    pending: Option<Vec<Object>>,
-}
-
-impl Document {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn objects(&self) -> &[Object] {
-        &self.objects
-    }
-
-    /// 可变对象列表（控制柄拖动用；不自动进历史，调用方负责 `begin`/`commit`）。
-    pub fn objects_mut(&mut self) -> &mut [Object] {
-        &mut self.objects
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.objects.is_empty()
-    }
-
-    pub fn can_undo(&self) -> bool {
-        !self.undo.is_empty()
-    }
-
-    pub fn can_redo(&self) -> bool {
-        !self.redo.is_empty()
-    }
-
-    /// 开始一次可撤销编辑（拖拽/新建前调用）。
-    pub fn begin(&mut self) {
-        self.pending = Some(self.objects.clone());
-    }
-
-    /// 结束编辑：`changed` 为真时把 `begin` 时的快照压入撤销栈。
-    /// 拖拽中每帧调用 `begin` 会污染历史，调用方应在按下时 `begin`、松开时 `commit`。
-    pub fn commit(&mut self, changed: bool) {
-        let Some(before) = self.pending.take() else {
-            return;
-        };
-        if !changed {
-            return;
-        }
-        self.push_history(before);
-    }
-
-    /// 直接提交一次变更（无 `begin` 的简单操作，如添加对象后立即归档）。
-    fn push_history(&mut self, before: Vec<Object>) {
-        self.undo.push(before);
-        if self.undo.len() > MAX_HISTORY {
-            self.undo.remove(0);
-        }
-        self.redo.clear();
-    }
-
-    /// 追加对象（不自动进历史，需调用方自行 `begin`/`commit`）。
-    pub fn push(&mut self, obj: Object) {
-        self.objects.push(obj);
-    }
-
-    /// 撤销；返回是否有变化。
-    pub fn undo(&mut self) -> bool {
-        let Some(prev) = self.undo.pop() else {
-            return false;
-        };
-        self.redo.push(std::mem::replace(&mut self.objects, prev));
-        true
-    }
-
-    /// 重做；返回是否有变化。
-    pub fn redo(&mut self) -> bool {
-        let Some(next) = self.redo.pop() else {
-            return false;
-        };
-        self.undo.push(std::mem::replace(&mut self.objects, next));
-        true
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -360,7 +288,7 @@ mod tests {
         assert!(doc.undo());
         assert!(doc.objects().is_empty());
         assert!(doc.redo());
-        assert!(matches!(doc.objects()[0].kind, Kind::Arrow { .. }));
+        assert!(matches!(&doc.objects()[0].kind, Kind::Arrow { .. }));
     }
 
     #[test]
@@ -378,7 +306,11 @@ mod tests {
             doc.push(rect((i as f32, 0.0), (i as f32 + 1.0, 1.0)));
             doc.commit(true);
         }
-        assert!(doc.undo.len() <= MAX_HISTORY);
+        let mut pops = 0;
+        while doc.undo() {
+            pops += 1;
+        }
+        assert!(pops <= MAX_HISTORY);
     }
 
     #[test]
@@ -452,6 +384,49 @@ mod tests {
         );
         assert!(a.hit(on_curve, 3.0), "曲线上的点应命中：{on_curve:?}");
         assert!(!a.hit(Point::new(45.0, 0.0), 3.0), "直线位置不应命中弯曲箭头");
+    }
+
+    #[test]
+    fn text_object_hit_and_bounds_with_measure_cache() {
+        let mut obj = Object {
+            kind: Kind::Text {
+                pos: Point::new(100.0, 50.0),
+                text: std::sync::Arc::from("测试"),
+                font_size: 24.0,
+                size: (48.0, 33.0), // 渲染层测量后的缓存
+            },
+            style: Style::new([255, 255, 255, 255], 2.0),
+        };
+        assert!(obj.hit(Point::new(110.0, 60.0), 3.0), "文字矩形内应命中");
+        assert!(!obj.hit(Point::new(200.0, 90.0), 3.0), "文字矩形外不命中");
+
+        let b = obj.bounds();
+        assert!(
+            b.x0 < 100.0 && b.y0 < 50.0 && b.x1 > 148.0 && b.y1 > 83.0,
+            "包围盒应含文字范围与内边距：{b:?}"
+        );
+        assert!(obj.kind.control_points().is_none(), "文本无控制柄");
+
+        // 对象保持 Copy 语义（Arc 引用计数，快照克隆不拷贝字符串内容）
+        let clone = obj.clone();
+        assert_eq!(obj, clone, "文本对象应可 Copy");
+
+        // 编辑文本后尺寸缓存由调用方重测
+        obj.kind = Kind::Text {
+            pos: Point::new(100.0, 50.0),
+            text: std::sync::Arc::from("测试"),
+            font_size: 32.0,
+            size: (64.0, 44.0),
+        };
+        let b2 = obj.bounds();
+        assert!(b2.x1 > b.x1, "字号变大后包围盒应变大");
+        assert!(obj.hit(Point::new(120.0, 70.0), 3.0));
+    }
+
+    #[test]
+    fn tool_all_includes_text() {
+        assert!(Tool::ALL.contains(&Tool::Text));
+        assert_eq!(Tool::ALL.len(), 5);
     }
 
     #[test]

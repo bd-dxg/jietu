@@ -10,7 +10,7 @@ use super::selection::DIRTY_PAD;
 /// 手柄命中半径。
 pub(super) const PICK_RADIUS: i32 = 6;
 
-/// 选区手柄类型（八向 + 移动）。
+/// 选区手柄类型（八向 + 移动 + 对象移动）。
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Handle {
     N,
@@ -22,6 +22,8 @@ pub(super) enum Handle {
     SE,
     SW,
     Move,
+    /// 拖动文本对象（EDT-4）。
+    MoveObj,
 }
 
 /// 八向手柄/移动命中（CAP-2）。
@@ -48,12 +50,14 @@ pub(super) fn hit_handle(sel: SelRect, x: i32, y: i32) -> Option<Handle> {
 
 /// 误触判定：长宽均不足 2px 的对象丢弃（EDT-1/EDT-2）。
 pub(super) fn is_degenerate(obj: &Object) -> bool {
-    match obj.kind {
+    match &obj.kind {
         Kind::Rect { a, b, .. } => (a.x - b.x).abs() < 2.0 && (a.y - b.y).abs() < 2.0,
         Kind::Arrow { from, to, .. } => (from.x - to.x).abs() < 2.0 && (from.y - to.y).abs() < 2.0,
         // 区域类（高亮/模糊）：过小视为误触
         Kind::Highlight { a, b } => (a.x - b.x).abs() < 2.0 && (a.y - b.y).abs() < 2.0,
         Kind::Blur { a, b, .. } => (a.x - b.x).abs() < 2.0 && (a.y - b.y).abs() < 2.0,
+        // 文本：空文本在提交时已拦截，进入文档的均为有效对象
+        Kind::Text { .. } => false,
     }
 }
 
@@ -174,12 +178,19 @@ impl super::Overlay {
         })
     }
 
-    /// 鼠标滚轮（EDT-7）：悬停在线条/矩形边框 / 模糊区域上时，
-    /// 滚轮连续调整线宽或模糊半径（Ctrl 3 倍步进）；无悬停对象时调整当前工具默认值。
+    /// 鼠标滚轮（EDT-7/EDT-4）：悬停在线条/矩形边框 / 模糊区域 / 文本上时，
+    /// 滚轮连续调整线宽、模糊半径或字号（Ctrl 3 倍步进）；无悬停对象时调整当前工具默认值。
     /// `sx`/`sy` 为屏幕坐标，需减虚拟屏幕原点转覆盖层坐标。
     pub(super) fn on_mouse_wheel(&mut self, sx: i32, sy: i32, delta: i16, ctrl: bool) {
         let (x, y) = (sx - self.capture.origin_x, sy - self.capture.origin_y);
         let step = if ctrl { 3.0 } else { 1.0 } * if delta > 0 { 1.0 } else { -1.0 };
+        // 文本输入中：滚轮调整输入字号（EDT-4）
+        if let Some(edit) = self.text_edit.as_mut() {
+            edit.font_size = (edit.font_size + step).clamp(10.0, 96.0);
+            self.font_size = edit.font_size;
+            self.repaint_text_edit();
+            return;
+        }
         if let Some(i) = self.hit_object(x, y) {
             self.adjust_object(i, step);
         } else {
@@ -188,42 +199,59 @@ impl super::Overlay {
                 crate::editor::Tool::Rect | crate::editor::Tool::Arrow => {
                     self.line_width = (self.line_width + step).clamp(1.0, 32.0);
                 }
+                crate::editor::Tool::Text => {
+                    self.font_size = (self.font_size + step).clamp(10.0, 96.0);
+                }
                 crate::editor::Tool::Blur => self.blur_radius = (self.blur_radius + step).clamp(4.0, 64.0),
                 crate::editor::Tool::Highlight => {}
             }
         }
     }
 
-    /// 调整指定对象的线宽 / 模糊半径（差分入撤销栈），并同步全局默认值。
+    /// 调整指定对象的线宽 / 模糊半径 / 字号（差分入撤销栈），并同步全局默认值。
     fn adjust_object(&mut self, i: usize, step: f32) {
         let before = self.selected_clip();
         self.doc.begin();
-        let (changed, is_width, new_val) = {
+        let changed = {
             let obj = &mut self.doc.objects_mut()[i];
-            match obj.kind {
+            match &mut obj.kind {
                 Kind::Rect { .. } | Kind::Arrow { .. } => {
                     let w = (obj.style.width + step).clamp(1.0, 32.0);
                     let changed = (w - obj.style.width).abs() > 0.01;
-                    obj.style.width = w;
-                    (changed, true, w)
+                    if changed {
+                        obj.style.width = w;
+                        self.line_width = w;
+                    }
+                    changed
                 }
-                Kind::Blur { a, b, radius } => {
-                    let r = (radius + step).clamp(4.0, 64.0);
-                    let changed = (r - radius).abs() > 0.01;
-                    obj.kind = Kind::Blur { a, b, radius: r };
-                    (changed, false, r)
+                Kind::Blur { radius, .. } => {
+                    let r = (*radius + step).clamp(4.0, 64.0);
+                    let changed = (r - *radius).abs() > 0.01;
+                    if changed {
+                        *radius = r;
+                        self.blur_radius = r;
+                    }
+                    changed
                 }
-                Kind::Highlight { .. } => (false, false, 0.0),
+                // 文本：字号连续可调，同步重建测量缓存（EDT-4）
+                Kind::Text {
+                    font_size, size, text, ..
+                } => {
+                    let fs = (*font_size + step).clamp(10.0, 96.0);
+                    let changed = (*font_size - fs).abs() > 0.01;
+                    if changed {
+                        *font_size = fs;
+                        *size = crate::render::text::measure(text, fs);
+                        self.font_size = fs;
+                    }
+                    changed
+                }
+                Kind::Highlight { .. } => false,
             }
         };
         self.doc.commit(changed);
         if !changed {
             return;
-        }
-        if is_width {
-            self.line_width = new_val;
-        } else {
-            self.blur_radius = new_val;
         }
         let after = self.selected_clip();
         let dirty = union_rect(before, after);

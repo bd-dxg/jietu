@@ -14,6 +14,8 @@ mod interaction;
 mod pick;
 mod selection;
 mod surface;
+mod text_edit_state;
+mod textinput;
 mod toolbar;
 mod wndproc;
 
@@ -28,6 +30,7 @@ use crate::editor::{self, Document, Object, Point, Tool};
 
 use geometry::SelRect;
 use interaction::{Drag, Phase};
+use text_edit_state::TextEdit;
 
 const WINDOW_CLASS: PCWSTR = w!("jietu.overlay");
 
@@ -49,6 +52,8 @@ pub struct Overlay {
     line_width: f32,
     /// 新建模糊对象的默认半径（EDT-5）。
     blur_radius: f32,
+    /// 新建文本对象的默认字号（EDT-4，滚轮可连续调整）。
+    font_size: f32,
     filled: bool,
     round: bool,
     /// 正在拖拽、尚未提交的标注对象。
@@ -57,6 +62,8 @@ pub struct Overlay {
     selected: Option<usize>,
     /// 正在拖动的曲线控制柄：(控制点索引, 按下时的坐标)（EDT-3）。
     ctrl_drag: Option<(usize, Point)>,
+    /// 文本输入中状态（EDT-4）。
+    text_edit: Option<TextEdit>,
     /// 当前工具栏布局（选区存在时才有）。
     bar: Option<toolbar::Toolbar>,
     pub hwnd: HWND,
@@ -111,11 +118,13 @@ impl Overlay {
             color_index: 1, // 默认红色
             line_width: editor::DEFAULT_LINE_WIDTH,
             blur_radius: editor::DEFAULT_BLUR_RADIUS,
+            font_size: editor::DEFAULT_FONT_SIZE,
             filled: false,
             round: false,
             draft: None,
             selected: None,
             ctrl_drag: None,
+            text_edit: None,
             bar: None,
             hwnd: HWND::default(),
             cancelled: false,
