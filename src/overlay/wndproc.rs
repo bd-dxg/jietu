@@ -11,8 +11,17 @@ use super::cursor::apply_cursor;
 use super::geometry::SelRect;
 
 pub(super) unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if msg == WM_DESTROY || msg == WM_NCCREATE {
+    if msg == WM_NCCREATE {
         return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+    }
+    // 窗口销毁（DestroyWindow 同步发送，不经消息队列）：必须 PostQuitMessage(0)
+    // 让消息循环的 GetMessageW 返回 0 并退出，否则覆盖层线程永久阻塞在消息循环，
+    // Overlay（含 4 份全屏位图）永不释放，每次截图都泄漏一份（实测每张 +57MB）。
+    if msg == WM_DESTROY {
+        unsafe {
+            let _ = PostQuitMessage(0);
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        }
     }
     let Some(overlay) = app_from(hwnd) else {
         return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };

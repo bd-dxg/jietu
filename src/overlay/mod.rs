@@ -209,8 +209,8 @@ impl Overlay {
             }
         }
 
-        // 局部消息循环：直到覆盖层窗口销毁（WM_DESTROY）。
-        // 不调用 PostQuitMessage，避免污染应用主消息队列。
+        // 局部消息循环：WM_DESTROY 由 wndproc 调 PostQuitMessage(0) 结束（独立线程，
+        // 不影响主线程消息队列）。退出后 `Box::from_raw` 释放 Overlay 及其 4 份全屏位图。
         unsafe {
             let mut msg = MSG::default();
             loop {
