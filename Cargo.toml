@@ -1,6 +1,6 @@
 [package]
 name = "jietu"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "轻量原生截图与标注工具（Windows，纯 CPU 渲染）"
 license = "GPL-3.0-only"
