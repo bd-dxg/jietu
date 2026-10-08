@@ -32,6 +32,8 @@ pub fn draw_object_with(pixmap: &mut Pixmap, obj: &Object, transform: Transform)
     match obj.kind {
         Kind::Rect { a, b, radius, filled } => draw_rect(pixmap, a, b, radius, filled, &obj.style, transform),
         Kind::Arrow { from, c1, c2, to } => draw_arrow(pixmap, from, c1, c2, to, &obj.style, transform),
+        Kind::Highlight { a, b } => draw_highlight(pixmap, a, b, &obj.style, transform),
+        Kind::Blur { a, b, radius } => draw_blur(pixmap, a, b, radius, transform),
     }
 }
 
@@ -59,6 +61,9 @@ pub fn bounds_to_clip(b: &Bounds) -> Clip {
         b.y1.ceil() as i32 + 1,
     )
 }
+
+/// 荧光笔透明度（EDT-6：半透明块 + 正片叠底，透出底图文字）。
+const HIGHLIGHT_ALPHA: u8 = 150;
 
 fn paint_of(color: [u8; 4]) -> Paint<'static> {
     let mut paint = Paint::default();
@@ -127,11 +132,19 @@ fn draw_arrow(pixmap: &mut Pixmap, from: Point, c1: Point, c2: Point, to: Point,
     let paint = paint_of(style.color);
 
     // 线身：截断在头部三角的边界（底边或侧边）上，避免弯曲时与头部脱开或穿出三角侧面（EDT-3a）；
-    // 再多画 0.5px 深入三角形内，消除接缝处的抗锯齿裂缝。
+    // 末端沿曲线在截断点的切线方向再深入「线宽一半 + 1px」，保证粗线也能完全没入三角，
+    // 不留下接缝（细线时代的固定 0.5px 深入对粗线不足）。
     let t0 =
         head_entry_t(from, c1, c2, to, base, (ux, uy), head, half).unwrap_or_else(|| t_at_arc_from_end(&pts, head));
     let seg = split_left(from, c1, c2, to, t0);
-    let line_end = Point::new(seg[3].x + ux * 0.5, seg[3].y + uy * 0.5);
+    let (tx, ty) = {
+        // 截断点处曲线的切线方向（切线与箭头方向不一致时，沿切线深入才不会滑出三角）
+        let (dx, dy) = (seg[3].x - seg[2].x, seg[3].y - seg[2].y);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len > 1e-6 { (dx / len, dy / len) } else { (ux, uy) }
+    };
+    let deep = (style.width * 0.5 + 1.0).max(1.0);
+    let line_end = Point::new(seg[3].x + tx * deep, seg[3].y + ty * deep);
     let mut line = PathBuilder::new();
     line.move_to(from.x, from.y);
     line.cubic_to(seg[1].x, seg[1].y, seg[2].x, seg[2].y, line_end.x, line_end.y);
@@ -153,6 +166,147 @@ fn draw_arrow(pixmap: &mut Pixmap, from: Point, c1: Point, c2: Point, to: Point,
     tri.close();
     if let Some(path) = tri.finish() {
         pixmap.fill_path(&path, &paint, FillRule::Winding, tr, None);
+    }
+}
+
+/// EDT-6 高亮：只取调色板 RGB（alpha 固定为荧光笔透明度），Multiply 混合保留底图明暗。
+/// EDT-6 高亮：半透明荧光笔色块。
+/// 逐像素混合 `dst × (1-a + a×src/255)`（正片叠底的半透明形式）：
+/// 白底被染成淡黄、深色文字几乎不变，不遮挡底图。纯 CPU 整数运算。
+fn draw_highlight(pixmap: &mut Pixmap, a: Point, b: Point, style: &Style, tr: Transform) {
+    let map = |p: Point| Point::new(tr.sx * p.x + tr.kx * p.y + tr.tx, tr.ky * p.x + tr.sy * p.y + tr.ty);
+    let pa = map(a);
+    let pb = map(b);
+    let (x0, y0) = (pa.x.min(pb.x).floor() as i32, pa.y.min(pb.y).floor() as i32);
+    let (x1, y1) = (pa.x.max(pb.x).ceil() as i32, pa.y.max(pb.y).ceil() as i32);
+    if x1 - x0 < 1 || y1 - y0 < 1 {
+        return;
+    }
+    let (x0, y0) = (x0.max(0), y0.max(0));
+    let (x1, y1) = (x1.min(pixmap.width() as i32), y1.min(pixmap.height() as i32));
+    if x1 - x0 < 1 || y1 - y0 < 1 {
+        return;
+    }
+    let (rw, rh) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    let stride = pixmap.width() as usize;
+    // 预计算各通道系数：coef = 255 - a + a×src/255
+    let a = HIGHLIGHT_ALPHA as u32;
+    let inv = 255 - a;
+    let coef = [
+        inv + a * style.color[0] as u32 / 255,
+        inv + a * style.color[1] as u32 / 255,
+        inv + a * style.color[2] as u32 / 255,
+    ];
+    let data = pixmap.data_mut();
+    for row in 0..rh {
+        let base = ((y0 as usize + row) * stride + x0 as usize) * 4;
+        for col in 0..rw {
+            let off = base + col * 4;
+            for c in 0..3 {
+                let d = data[off + c] as u32;
+                data[off + c] = (d * coef[c] / 255) as u8;
+            }
+        }
+    }
+}
+
+/// EDT-5 高斯模糊：从像素图自身抠出区域做盒式模糊后贴回。
+/// 重绘路径上底图已复位（见 `overlay::selection::repaint`），此处模糊的即原图内容；
+/// z 序在其下的对象也会一并模糊（与真实模糊工具盖在上层的效果一致）。
+/// 盒式模糊（Box Blur）迭代近似高斯，纯 CPU 友好；`tr` 用于导出烘焙的坐标平移。
+fn draw_blur(pixmap: &mut Pixmap, a: Point, b: Point, radius: f32, tr: Transform) {
+    // 变换目前只有导出烘焙的纯平移；写成通用仿射，避免依赖 tiny-skia 的 Point 类型
+    let map = |p: Point| Point::new(tr.sx * p.x + tr.kx * p.y + tr.tx, tr.ky * p.x + tr.sy * p.y + tr.ty);
+    let pa = map(a);
+    let pb = map(b);
+    let (x0, y0) = (pa.x.min(pb.x).floor() as i32, pa.y.min(pb.y).floor() as i32);
+    let (x1, y1) = (pa.x.max(pb.x).ceil() as i32, pa.y.max(pb.y).ceil() as i32);
+    if x1 - x0 < 1 || y1 - y0 < 1 {
+        return;
+    }
+    box_blur_region(pixmap, x0, y0, x1 - x0, y1 - y0, radius, 2);
+}
+
+/// 区域盒式模糊：`passes` 次水平+垂直滑动窗口（边缘复制），就地修改像素图指定区域。
+/// 区域坐标已在目标坐标系；半径过小或区域越界时安全返回。
+fn box_blur_region(pixmap: &mut Pixmap, x0: i32, y0: i32, rw: i32, rh: i32, radius: f32, passes: u32) {
+    let r = radius.round().max(1.0) as i32;
+    if rw < 1 || rh < 1 || r < 1 {
+        return;
+    }
+    let (x0, y0) = (x0.max(0), y0.max(0));
+    let (w, h) = (pixmap.width() as i32, pixmap.height() as i32);
+    let (x1, y1) = ((x0 + rw).min(w), (y0 + rh).min(h));
+    let (rw, rh) = (x1 - x0, y1 - y0);
+    if rw < 1 || rh < 1 {
+        return;
+    }
+    let (rw, rh) = (rw as usize, rh as usize);
+    let stride = pixmap.width() as usize;
+
+    // 独立区域缓冲：多 pass 之间只在本区域读写，不污染区域外像素
+    let mut buf = vec![0u8; rw * rh * 4];
+    for row in 0..rh {
+        let src = (y0 as usize + row) * stride + x0 as usize;
+        buf[row * rw * 4..(row + 1) * rw * 4].copy_from_slice(&pixmap.data()[src * 4..(src + rw) * 4]);
+    }
+    let mut tmp = vec![0u8; buf.len()];
+    for _ in 0..passes {
+        box_blur_hv(&mut buf, &mut tmp, rw, rh, r as usize);
+    }
+    for row in 0..rh {
+        let dst = (y0 as usize + row) * stride + x0 as usize;
+        pixmap.data_mut()[dst * 4..(dst + rw) * 4].copy_from_slice(&buf[row * rw * 4..(row + 1) * rw * 4]);
+    }
+}
+
+/// 一次水平 + 垂直盒式模糊：水平结果写入 `out`，垂直结果写回 `buf`。
+/// 滑动窗口 O(n)，边缘 clamp 到边界像素（等同于复制延伸）。
+fn box_blur_hv(buf: &mut [u8], out: &mut [u8], w: usize, h: usize, r: usize) {
+    box_blur_h(buf, out, w, h, r);
+    box_blur_v(out, buf, w, h, r);
+}
+
+/// 水平滑动窗口模糊：`src` → `dst`（每行独立窗口）。
+fn box_blur_h(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize) {
+    let win = (r * 2 + 1) as u32;
+    for y in 0..h {
+        let base = y * w;
+        for c in 0..4 {
+            let mut sum: u32 = 0;
+            for x in -(r as i32)..=(r as i32) {
+                let px = x.clamp(0, w as i32 - 1) as usize;
+                sum += src[(base + px) * 4 + c] as u32;
+            }
+            for x in 0..w {
+                dst[(base + x) * 4 + c] = (sum / win) as u8;
+                let rm = (x as i32 - r as i32).clamp(0, w as i32 - 1) as usize;
+                let add = (x as i32 + r as i32 + 1).clamp(0, w as i32 - 1) as usize;
+                sum += src[(base + add) * 4 + c] as u32;
+                sum -= src[(base + rm) * 4 + c] as u32;
+            }
+        }
+    }
+}
+
+/// 垂直滑动窗口模糊：`src` → `dst`（每列独立窗口）。
+fn box_blur_v(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize) {
+    let win = (r * 2 + 1) as u32;
+    for x in 0..w {
+        for c in 0..4 {
+            let mut sum: u32 = 0;
+            for y in -(r as i32)..=(r as i32) {
+                let py = y.clamp(0, h as i32 - 1) as usize;
+                sum += src[(py * w + x) * 4 + c] as u32;
+            }
+            for y in 0..h {
+                dst[(y * w + x) * 4 + c] = (sum / win) as u8;
+                let rm = (y as i32 - r as i32).clamp(0, h as i32 - 1) as usize;
+                let add = (y as i32 + r as i32 + 1).clamp(0, h as i32 - 1) as usize;
+                sum += src[(add * w + x) * 4 + c] as u32;
+                sum -= src[(rm * w + x) * 4 + c] as u32;
+            }
+        }
     }
 }
 
@@ -351,5 +505,181 @@ mod tests {
         };
         assert!(intersects(&b.bounds(), (0, 0, 100, 100)));
         assert!(!intersects(&b.bounds(), (200, 200, 300, 300)));
+    }
+
+    /// 曲线箭头：沿「尖端 → 线身」方向取横截面，任何截面都不能出现断裂（露背景色）。
+    #[test]
+    fn curved_arrow_head_attached_at_wide_width() {
+        let (from, c1, c2, to) = (
+            Point::new(30.0, 260.0),
+            Point::new(40.0, 60.0),
+            Point::new(260.0, 40.0),
+            Point::new(270.0, 250.0),
+        );
+        for w in [4.0, 24.0] {
+            let mut p = new_pixmap(300, 300);
+            p.fill(tiny_skia::Color::from_rgba8(40, 40, 40, 255));
+            let obj = Object {
+                kind: Kind::Arrow { from, c1, c2, to },
+                style: Style::new([255, 0, 0, 255], w),
+            };
+            draw_object(&mut p, &obj);
+
+            // 沿终点切线方向从尖端往回扫描：横截面必须始终有红色覆盖，无断裂
+            // 扫描到 base（head）往后 60px，覆盖线身与头部交界处
+            let t = end_tangent(c1, c2, to);
+            let len = (t.x * t.x + t.y * t.y).sqrt();
+            let (ux, uy) = (t.x / len, t.y / len);
+            let perp = (-uy, ux);
+            let span = (w * 0.5 + 4.0) as i32;
+            let head = arrow_head_len(w);
+            let max_back = (head + 60.0) as i32;
+            for s in (0..=max_back).rev() {
+                let back = s as f32; // 距尖端 0..(head+60)px
+                let (cx, cy) = (to.x - ux * back, to.y - uy * back);
+                let mut covered = 0; // 覆盖线宽范围的横截面上红色像素数
+                for o in -span..=span {
+                    let px = (cx + perp.0 * o as f32).round() as i32;
+                    let py = (cy + perp.1 * o as f32).round() as i32;
+                    if px >= 0 && px < 300 && py >= 0 && py < 300 && alpha_at(&p, px as u32, py as u32) > 0 {
+                        covered += 1;
+                    }
+                }
+                let inside = back <= head + 0.5; // 三角内截面必然实心
+                let expect = if inside { (w * 0.5) as i32 } else { 1 };
+                assert!(
+                    covered >= expect,
+                    "w={w} 距尖端 {back:.1}px 处断面覆盖过少（脱节）：covered={covered}"
+                );
+            }
+        }
+    }
+
+    /// 读取像素 RGBA。
+    fn pixel(p: &Pixmap, x: u32, y: u32) -> (u8, u8, u8, u8) {
+        let off = ((y * p.width() + x) * 4) as usize;
+        (p.data()[off], p.data()[off + 1], p.data()[off + 2], p.data()[off + 3])
+    }
+
+    #[test]
+    fn highlight_multiply_darkens_background() {
+        let mut p = new_pixmap(80, 40);
+        p.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let obj = Object {
+            kind: Kind::Highlight {
+                a: Point::new(10.0, 10.0),
+                b: Point::new(70.0, 30.0),
+            },
+            style: Style::new([255, 240, 0, 255], 2.0),
+        };
+        draw_object(&mut p, &obj);
+
+        // 白底（255）× 半透明黄：R 不变、G 略降、B 明显降 → 淡黄；黑色文字保持黑
+        let (r, g, b, _) = pixel(&p, 40, 20);
+        assert_eq!(r, 255, "白底 R 通道应保持（源 R=255）：r={r}");
+        assert!(g < 255 && g > 200, "白底 G 通道应轻微下降（染黄）：g={g}");
+        assert!(b > 40 && b < 160, "白底 B 通道应明显下降：b={b}");
+        let (or, og, ob, _) = pixel(&p, 5, 5);
+        assert_eq!((or, og, ob), (255, 255, 255), "区域外应保持纯白");
+    }
+
+    #[test]
+    fn highlight_preserves_dark_text() {
+        // 黑字（0）在高亮区内应保持黑色，不被色块覆盖
+        let mut p = new_pixmap(40, 40);
+        p.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut black = Paint::default();
+        black.set_color_rgba8(0, 0, 0, 255);
+        p.fill_rect(
+            Rect::from_xywh(15.0, 19.0, 10.0, 3.0).unwrap(),
+            &black,
+            Transform::identity(),
+            None,
+        );
+        let obj = Object {
+            kind: Kind::Highlight {
+                a: Point::new(10.0, 10.0),
+                b: Point::new(30.0, 30.0),
+            },
+            style: Style::new([255, 240, 0, 255], 2.0),
+        };
+        draw_object(&mut p, &obj);
+
+        let (r, _, _, _) = pixel(&p, 20, 20);
+        assert_eq!(r, 0, "高亮区内黑色文字应保持黑色：r={r}");
+    }
+
+    #[test]
+    fn blur_smooths_and_preserves_energy() {
+        let mut p = new_pixmap(40, 40);
+        p.fill(tiny_skia::Color::from_rgba8(0, 0, 0, 255));
+        // 5×5 白色块，中心 (20..25)²
+        for dy in 20..25 {
+            for dx in 20..25 {
+                let off = (dy * 40 + dx) * 4;
+                p.data_mut()[off..off + 4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+        let before: u32 = p
+            .data()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % 4 == 0)
+            .map(|(_, v)| *v as u32)
+            .sum();
+        let obj = Object {
+            kind: Kind::Blur {
+                a: Point::new(10.0, 10.0),
+                b: Point::new(30.0, 30.0),
+                radius: 2.0,
+            },
+            style: Style::new([0, 0, 0, 255], 2.0),
+        };
+        draw_object(&mut p, &obj);
+
+        let center = pixel(&p, 22, 22).0;
+        assert!(center > 20 && center < 255, "亮块中心应被平滑但保留亮度：r={center}");
+        let spread = pixel(&p, 18, 22).0;
+        assert!(spread > 0, "亮度应扩散到块外：r={spread}");
+        assert_eq!(pixel(&p, 5, 5).0, 0, "模糊区域外应保持黑色");
+        let after: u32 = p
+            .data()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % 4 == 0)
+            .map(|(_, v)| *v as u32)
+            .sum();
+        assert!(
+            (before as i64 - after as i64).abs() < before as i64 / 50,
+            "模糊不应增删亮度：before={before} after={after}"
+        );
+    }
+
+    #[test]
+    fn blur_bake_respects_crop_translate() {
+        // 覆盖层坐标：亮块 (108,108)-(113,113)，模糊对象 (105,105)-(115,115)；裁剪原点 (100,100)
+        // → 模糊区落在裁剪图 (5,5)-(15,15)，亮块在 (8,8)-(13,13) 被模糊
+        let mut p = new_pixmap(40, 40);
+        p.fill(tiny_skia::Color::from_rgba8(0, 0, 0, 255));
+        for dy in 8..13 {
+            for dx in 8..13 {
+                let off = (dy * 40 + dx) * 4;
+                p.data_mut()[off..off + 4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+        let obj = Object {
+            kind: Kind::Blur {
+                a: Point::new(105.0, 105.0),
+                b: Point::new(115.0, 115.0),
+                radius: 2.0,
+            },
+            style: Style::new([0, 0, 0, 255], 2.0),
+        };
+        bake_objects(&mut p, &[obj], (100, 100));
+
+        let (r, _, _, _) = pixel(&p, 10, 10);
+        assert!(r > 20 && r < 255, "亮块中心应被模糊：r={r}");
+        let (out, _, _, _) = pixel(&p, 2, 10);
+        assert_eq!(out, 0, "模糊区外应保持黑色");
     }
 }

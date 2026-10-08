@@ -5,7 +5,7 @@ mod draw;
 
 use tiny_skia::Pixmap;
 
-use crate::editor::{PALETTE, Tool, WIDTH_PRESETS};
+use crate::editor::{PALETTE, Tool};
 use crate::overlay::geometry::{INFO_OFFSET, INFO_TEXT_H, SelRect};
 
 /// 工具栏高度（绘制与布局共用）。
@@ -14,8 +14,6 @@ pub const H: i32 = 34;
 pub(crate) const BTN: i32 = 26;
 /// 色块边长。
 pub(crate) const SW: i32 = 22;
-/// 线宽按钮宽度。
-pub(crate) const WW: i32 = 24;
 /// 元素间距。
 pub(crate) const GAP: i32 = 4;
 /// 组分隔区宽度。
@@ -38,7 +36,6 @@ pub(crate) const ACCENT_SOFT: [u8; 4] = [26, 115, 232, 90];
 pub struct State {
     pub tool: Tool,
     pub color: usize,
-    pub width: usize,
     /// 矩形是否填充（EDT-1）。
     pub filled: bool,
     /// 矩形是否圆角（EDT-1）。
@@ -52,7 +49,6 @@ pub struct State {
 pub enum Action {
     Tool(Tool),
     Color(usize),
-    Width(usize),
     ToggleFill,
     ToggleRound,
     Undo,
@@ -110,10 +106,6 @@ pub fn layout(sel: SelRect, screen_w: i32, screen_h: i32) -> Toolbar {
     c.sep();
     for i in 0..PALETTE.len() {
         item(&mut c, SW, SW, Action::Color(i));
-    }
-    c.sep();
-    for i in 0..WIDTH_PRESETS.len() {
-        item(&mut c, WW, BTN, Action::Width(i));
     }
     c.sep();
     item(&mut c, BTN, BTN, Action::ToggleFill);
@@ -199,12 +191,13 @@ mod tests {
         let center = |offset: i32| bar.hit(bar.rect.x + offset, y);
         assert_eq!(center(18), Some(Action::Tool(Tool::Rect)));
         assert_eq!(center(48), Some(Action::Tool(Tool::Arrow)));
-        assert_eq!(center(81), Some(Action::Color(0)));
-        assert_eq!(center(107), Some(Action::Color(1)));
-        assert_eq!(center(217), Some(Action::Width(0)));
-        assert_eq!(center(307), Some(Action::ToggleFill));
-        assert_eq!(center(337), Some(Action::ToggleRound));
-        assert_eq!(center(372), Some(Action::Undo));
-        assert_eq!(center(402), Some(Action::Redo));
+        assert_eq!(center(78), Some(Action::Tool(Tool::Highlight)));
+        assert_eq!(center(108), Some(Action::Tool(Tool::Blur)));
+        assert_eq!(center(141), Some(Action::Color(0)));
+        assert_eq!(center(167), Some(Action::Color(1)));
+        assert_eq!(center(278), Some(Action::ToggleFill));
+        assert_eq!(center(308), Some(Action::ToggleRound));
+        assert_eq!(center(343), Some(Action::Undo));
+        assert_eq!(center(373), Some(Action::Redo));
     }
 }
