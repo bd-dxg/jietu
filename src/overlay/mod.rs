@@ -24,7 +24,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
 use crate::capture::CapturedScreen;
-use crate::editor::{Document, Object, Point, Tool};
+use crate::editor::{self, Document, Object, Point, Tool};
 
 use geometry::SelRect;
 use interaction::{Drag, Phase};
@@ -45,7 +45,10 @@ pub struct Overlay {
     /// 当前工具与样式（EDT-7）。
     tool: Tool,
     color_index: usize,
-    width_index: usize,
+    /// 新建对象的默认线宽（滚轮 / 二级工具栏可连续调整）。
+    line_width: f32,
+    /// 新建模糊对象的默认半径（EDT-5）。
+    blur_radius: f32,
     filled: bool,
     round: bool,
     /// 正在拖拽、尚未提交的标注对象。
@@ -106,7 +109,8 @@ impl Overlay {
             doc: Document::new(),
             tool: Tool::Rect,
             color_index: 1, // 默认红色
-            width_index: 1, // 默认 4px
+            line_width: editor::DEFAULT_LINE_WIDTH,
+            blur_radius: editor::DEFAULT_BLUR_RADIUS,
             filled: false,
             round: false,
             draft: None,

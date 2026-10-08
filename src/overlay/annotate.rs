@@ -15,19 +15,15 @@ use crate::editor::{self, Style};
 use crate::{output, render};
 
 impl super::Overlay {
-    /// 当前样式（EDT-7：颜色 + 线宽）。
+    /// 当前样式（EDT-7：颜色 + 连续线宽）。
     pub(super) fn current_style(&self) -> Style {
-        Style::new(
-            editor::PALETTE[self.color_index],
-            editor::WIDTH_PRESETS[self.width_index],
-        )
+        Style::new(editor::PALETTE[self.color_index], self.line_width)
     }
 
     pub(super) fn bar_state(&self) -> toolbar::State {
         toolbar::State {
             tool: self.tool,
             color: self.color_index,
-            width: self.width_index,
             filled: self.filled,
             round: self.round,
             can_undo: self.doc.can_undo(),
@@ -40,7 +36,6 @@ impl super::Overlay {
         match action {
             toolbar::Action::Tool(t) => self.tool = t,
             toolbar::Action::Color(i) => self.color_index = i,
-            toolbar::Action::Width(i) => self.width_index = i,
             toolbar::Action::ToggleFill => self.filled = !self.filled,
             toolbar::Action::ToggleRound => self.round = !self.round,
             toolbar::Action::Undo => return self.on_undo(),

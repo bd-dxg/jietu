@@ -114,6 +114,9 @@ impl super::Overlay {
                     },
                     // 拖动中重建箭头：控制点保持在 1/3、2/3 处（EDT-3 从直线开始）
                     Kind::Arrow { from, .. } => Kind::arrow(from, end),
+                    // 区域类（高亮/模糊）：只更新对角点，半径/样式不变
+                    Kind::Highlight { a, .. } => Kind::Highlight { a, b: end },
+                    Kind::Blur { a, radius, .. } => Kind::Blur { a, b: end, radius },
                 };
             }
             if let Some(d) = union_rect(before, self.draft_region()) {
@@ -238,6 +241,12 @@ impl super::Overlay {
                 filled: self.filled,
             },
             Tool::Arrow => Kind::arrow(p, p),
+            Tool::Highlight => Kind::Highlight { a: p, b: p },
+            Tool::Blur => Kind::Blur {
+                a: p,
+                b: p,
+                radius: self.blur_radius,
+            },
         };
         self.doc.begin();
         self.draft = Some(Object {

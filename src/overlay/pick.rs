@@ -51,6 +51,9 @@ pub(super) fn is_degenerate(obj: &Object) -> bool {
     match obj.kind {
         Kind::Rect { a, b, .. } => (a.x - b.x).abs() < 2.0 && (a.y - b.y).abs() < 2.0,
         Kind::Arrow { from, to, .. } => (from.x - to.x).abs() < 2.0 && (from.y - to.y).abs() < 2.0,
+        // 区域类（高亮/模糊）：过小视为误触
+        Kind::Highlight { a, b } => (a.x - b.x).abs() < 2.0 && (a.y - b.y).abs() < 2.0,
+        Kind::Blur { a, b, .. } => (a.x - b.x).abs() < 2.0 && (a.y - b.y).abs() < 2.0,
     }
 }
 
@@ -161,7 +164,7 @@ impl super::Overlay {
     }
 
     /// 选中对象占据的像素区域。
-    fn selected_clip(&self) -> Option<SelRect> {
+    pub(super) fn selected_clip(&self) -> Option<SelRect> {
         let c = crate::render::bounds_to_clip(&self.selected_object()?.bounds());
         Some(SelRect {
             x: c.0,
@@ -169,5 +172,67 @@ impl super::Overlay {
             w: c.2 - c.0,
             h: c.3 - c.1,
         })
+    }
+
+    /// 鼠标滚轮（EDT-7）：悬停在线条/矩形边框 / 模糊区域上时，
+    /// 滚轮连续调整线宽或模糊半径（Ctrl 3 倍步进）；无悬停对象时调整当前工具默认值。
+    /// `sx`/`sy` 为屏幕坐标，需减虚拟屏幕原点转覆盖层坐标。
+    pub(super) fn on_mouse_wheel(&mut self, sx: i32, sy: i32, delta: i16, ctrl: bool) {
+        let (x, y) = (sx - self.capture.origin_x, sy - self.capture.origin_y);
+        let step = if ctrl { 3.0 } else { 1.0 } * if delta > 0 { 1.0 } else { -1.0 };
+        if let Some(i) = self.hit_object(x, y) {
+            self.adjust_object(i, step);
+        } else {
+            // 空白处滚动：只改默认值，供下一次绘制沿用
+            match self.tool {
+                crate::editor::Tool::Rect | crate::editor::Tool::Arrow => {
+                    self.line_width = (self.line_width + step).clamp(1.0, 32.0);
+                }
+                crate::editor::Tool::Blur => self.blur_radius = (self.blur_radius + step).clamp(4.0, 64.0),
+                crate::editor::Tool::Highlight => {}
+            }
+        }
+    }
+
+    /// 调整指定对象的线宽 / 模糊半径（差分入撤销栈），并同步全局默认值。
+    fn adjust_object(&mut self, i: usize, step: f32) {
+        let before = self.selected_clip();
+        self.doc.begin();
+        let (changed, is_width, new_val) = {
+            let obj = &mut self.doc.objects_mut()[i];
+            match obj.kind {
+                Kind::Rect { .. } | Kind::Arrow { .. } => {
+                    let w = (obj.style.width + step).clamp(1.0, 32.0);
+                    let changed = (w - obj.style.width).abs() > 0.01;
+                    obj.style.width = w;
+                    (changed, true, w)
+                }
+                Kind::Blur { a, b, radius } => {
+                    let r = (radius + step).clamp(4.0, 64.0);
+                    let changed = (r - radius).abs() > 0.01;
+                    obj.kind = Kind::Blur { a, b, radius: r };
+                    (changed, false, r)
+                }
+                Kind::Highlight { .. } => (false, false, 0.0),
+            }
+        };
+        self.doc.commit(changed);
+        if !changed {
+            return;
+        }
+        if is_width {
+            self.line_width = new_val;
+        } else {
+            self.blur_radius = new_val;
+        }
+        let after = self.selected_clip();
+        let dirty = union_rect(before, after);
+        if let Some(d) = dirty {
+            self.repaint(expand_rect(d, 4));
+        }
+        if let Some(bar) = &self.bar {
+            // 撤销可用性变化
+            self.repaint(expand_rect(bar.rect, 2));
+        }
     }
 }

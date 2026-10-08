@@ -59,7 +59,7 @@ impl Style {
     }
 }
 
-/// 对象几何（EDT-1 矩形 / EDT-2 直线箭头 / EDT-3 曲线箭头）。
+/// 对象几何（EDT-1 矩形 / EDT-2 直线箭头 / EDT-3 曲线箭头 / EDT-5 模糊 / EDT-6 高亮）。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind {
     /// EDT-1 矩形：对角两点；`radius` 圆角半径；`filled` 是否填充（描边始终绘制）。
@@ -76,6 +76,10 @@ pub enum Kind {
         c2: Point,
         to: Point,
     },
+    /// EDT-6 高亮：对角两点，荧光笔效果（半透明色块 + Multiply 混合，不遮挡文字）。
+    Highlight { a: Point, b: Point },
+    /// EDT-5 高斯模糊：对角两点，`radius` 为模糊半径（由工具栏强度档位映射）。
+    Blur { a: Point, b: Point, radius: f32 },
 }
 
 impl Kind {
@@ -93,7 +97,7 @@ impl Kind {
     pub fn control_points(&self) -> Option<[Point; 2]> {
         match *self {
             Kind::Arrow { c1, c2, .. } => Some([c1, c2]),
-            Kind::Rect { .. } => None,
+            Kind::Rect { .. } | Kind::Highlight { .. } | Kind::Blur { .. } => None,
         }
     }
 
@@ -131,6 +135,10 @@ impl Kind {
                 let (x0, y0, x1, y1) = curve::hull_bounds(from, c1, c2, to);
                 Bounds::around(x0, y0, x1, y1, pad)
             }
+            // 区域类（高亮/模糊）：整块都是绘制内容，外扩 1px 保证脏区取整
+            Kind::Highlight { a, b } | Kind::Blur { a, b, .. } => {
+                Bounds::around(a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y), 1.0)
+            }
         }
     }
 }
@@ -162,20 +170,25 @@ impl Object {
     }
 }
 
-/// 当前绘制工具（EDT-1/EDT-2）。
+/// 当前绘制工具（EDT-1/EDT-2/EDT-5/EDT-6）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
     Rect,
     Arrow,
+    Highlight,
+    Blur,
 }
 
 impl Tool {
     /// 工具栏顺序。
-    pub const ALL: [Tool; 2] = [Tool::Rect, Tool::Arrow];
+    pub const ALL: [Tool; 4] = [Tool::Rect, Tool::Arrow, Tool::Highlight, Tool::Blur];
 }
 
-/// 线宽档位（物理像素）。
-pub const WIDTH_PRESETS: [f32; 3] = [2.0, 4.0, 8.0];
+/// 新建对象默认线宽（物理像素，连续可调：滚轮 / 二级工具栏）。
+pub const DEFAULT_LINE_WIDTH: f32 = 4.0;
+
+/// 模糊默认强度（EDT-5：半径，连续可调）。
+pub const DEFAULT_BLUR_RADIUS: f32 = 16.0;
 
 /// 颜色调色板（RGBA）。透明度由工具栏后续提供，当前固定 255。
 pub const PALETTE: [[u8; 4]; 5] = [
@@ -439,5 +452,33 @@ mod tests {
         );
         assert!(a.hit(on_curve, 3.0), "曲线上的点应命中：{on_curve:?}");
         assert!(!a.hit(Point::new(45.0, 0.0), 3.0), "直线位置不应命中弯曲箭头");
+    }
+
+    #[test]
+    fn area_objects_hit_and_bounds() {
+        let hl = Object {
+            kind: Kind::Highlight {
+                a: Point::new(10.0, 10.0),
+                b: Point::new(50.0, 40.0),
+            },
+            style: Style::new([255, 240, 0, 255], 2.0),
+        };
+        assert!(hl.hit(Point::new(30.0, 25.0), 3.0), "高亮内部应命中");
+        assert!(!hl.hit(Point::new(60.0, 25.0), 3.0), "高亮外部不应命中");
+        let b = hl.bounds();
+        assert!(b.x0 <= 10.0 && b.x1 >= 50.0 && b.y0 <= 10.0 && b.y1 >= 40.0);
+
+        let blur = Object {
+            kind: Kind::Blur {
+                a: Point::new(1.0, 2.0),
+                b: Point::new(11.0, 22.0),
+                radius: 16.0,
+            },
+            style: Style::new([0, 0, 0, 255], 2.0),
+        };
+        assert!(blur.hit(Point::new(5.0, 10.0), 3.0), "模糊内部应命中");
+        assert!(!blur.hit(Point::new(30.0, 30.0), 3.0), "模糊外部不应命中");
+        assert!(blur.kind.control_points().is_none(), "区域类无控制柄");
+        assert!(Tool::ALL.contains(&Tool::Highlight) && Tool::ALL.contains(&Tool::Blur));
     }
 }

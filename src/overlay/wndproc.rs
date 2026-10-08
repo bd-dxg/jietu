@@ -34,6 +34,14 @@ pub(super) unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARA
             overlay.on_lbutton_up();
             LRESULT(0)
         }
+        WM_MOUSEWHEEL => {
+            // lparam 为屏幕坐标（非客户区），转覆盖层坐标由 on_mouse_wheel 完成
+            let sx = (lparam.0 & 0xFFFF) as u16 as i16 as i32;
+            let sy = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
+            let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16; // ±120 单位
+            overlay.on_mouse_wheel(sx, sy, delta, ctrl_down());
+            LRESULT(0)
+        }
         WM_RBUTTONUP => {
             overlay.on_cancel();
             LRESULT(0)

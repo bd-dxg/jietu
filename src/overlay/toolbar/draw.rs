@@ -3,7 +3,7 @@
 
 use tiny_skia::{Paint, PathBuilder, Pixmap, Rect, Transform};
 
-use crate::editor::{Kind, Object, PALETTE, Point, Style, Tool, WIDTH_PRESETS};
+use crate::editor::{Kind, Object, PALETTE, Point, Style, Tool};
 use crate::overlay::SelRect;
 use crate::overlay::toolbar::{ACCENT, ACCENT_SOFT, Action, BG, BORDER, GAP, H, ICON, ICON_DIM, State, Toolbar};
 use crate::render;
@@ -13,7 +13,7 @@ pub fn render(pixmap: &mut Pixmap, bar: &Toolbar, state: &State) {
     rounded_rect(pixmap, bar.rect, 7.0, BG, Some(BORDER));
 
     // 组分隔线：画在每个组首个元素左侧的空白处
-    for &index in &[2usize, 7, 10, 12] {
+    for &index in &[4usize, 9, 11] {
         let Some((first, _)) = bar.hits.get(index) else {
             continue;
         };
@@ -30,11 +30,19 @@ pub fn render(pixmap: &mut Pixmap, bar: &Toolbar, state: &State) {
                 if active {
                     rounded_rect(pixmap, *r, 5.0, ACCENT_SOFT, None);
                 }
-                let icon = match tool {
-                    Tool::Rect => rect_icon(*r, 0.0, false, if active { ICON } else { ICON_DIM }),
-                    Tool::Arrow => arrow_icon(*r, if active { ICON } else { ICON_DIM }),
-                };
-                render::draw_object(pixmap, &icon);
+                match tool {
+                    Tool::Rect => {
+                        let icon = rect_icon(*r, 0.0, false, if active { ICON } else { ICON_DIM });
+                        render::draw_object(pixmap, &icon);
+                    }
+                    Tool::Arrow => {
+                        let icon = arrow_icon(*r, if active { ICON } else { ICON_DIM });
+                        render::draw_object(pixmap, &icon);
+                    }
+                    // 高亮图标固定荧光黄（激活时更浓）
+                    Tool::Highlight => highlight_icon(pixmap, *r, if active { 230 } else { 150 }),
+                    Tool::Blur => blur_icon(pixmap, *r, if active { ICON } else { ICON_DIM }),
+                }
             }
             Action::Color(i) => {
                 let inset = 2;
@@ -47,18 +55,6 @@ pub fn render(pixmap: &mut Pixmap, bar: &Toolbar, state: &State) {
                 rounded_rect(pixmap, swatch, 4.0, PALETTE[i], Some([0, 0, 0, 120]));
                 if i == state.color {
                     rounded_rect_outline(pixmap, *r, 4.0, ACCENT);
-                }
-            }
-            Action::Width(i) => {
-                if i == state.width {
-                    rounded_rect(pixmap, *r, 5.0, ACCENT_SOFT, None);
-                }
-                let lw = WIDTH_PRESETS[i];
-                let len = (r.w as f32 * 0.66).max(4.0);
-                let yc = r.y as f32 + r.h as f32 / 2.0;
-                let xc = r.x as f32 + r.w as f32 / 2.0;
-                if let Some(rect) = Rect::from_xywh(xc - len / 2.0, yc - lw / 2.0, len, lw) {
-                    pixmap.fill_rect(rect, &paint(ICON), Transform::identity(), None);
                 }
             }
             Action::ToggleFill => {
@@ -104,6 +100,60 @@ fn arrow_icon(r: SelRect, color: [u8; 4]) -> Object {
             Point::new((r.x + r.w) as f32 - inset, r.y as f32 + inset),
         ),
         style: Style::new(color, 2.0),
+    }
+}
+
+/// 高亮按钮图标：斜置半透明荧光黄色块（模拟画笔笔迹）。
+fn highlight_icon(pixmap: &mut Pixmap, r: SelRect, alpha: u8) {
+    let (x0, x1) = (r.x as f32 + 6.0, (r.x + r.w) as f32 - 6.0);
+    let (y_top, y_bot) = (r.y as f32 + 7.0, (r.y + r.h) as f32 - 7.0);
+    let skew = 4.0;
+    let mut pb = PathBuilder::new();
+    pb.move_to(x0, y_top + skew);
+    pb.line_to(x1, y_bot + skew);
+    pb.line_to(x1, y_bot - skew);
+    pb.line_to(x0, y_top - skew);
+    pb.close();
+    if let Some(path) = pb.finish() {
+        pixmap.fill_path(
+            &path,
+            &paint([255, 230, 0, alpha]),
+            tiny_skia::FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+}
+
+/// 模糊按钮图标：中心实心圆 + 断线圆环（表示虚化）。
+fn blur_icon(pixmap: &mut Pixmap, r: SelRect, color: [u8; 4]) {
+    let (cx, cy) = (r.x as f32 + r.w as f32 / 2.0, r.y as f32 + r.h as f32 / 2.0);
+    let mut inner = PathBuilder::new();
+    inner.push_circle(cx, cy, 3.5);
+    if let Some(path) = inner.finish() {
+        pixmap.fill_path(
+            &path,
+            &paint(color),
+            tiny_skia::FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+    let rad = 8.5;
+    let steps = 20;
+    let mut ring = PathBuilder::new();
+    for i in (0..steps).step_by(2) {
+        let a0 = std::f32::consts::TAU * i as f32 / steps as f32;
+        let a1 = std::f32::consts::TAU * (i + 1) as f32 / steps as f32;
+        ring.move_to(cx + rad * a0.cos(), cy + rad * a0.sin());
+        ring.line_to(cx + rad * a1.cos(), cy + rad * a1.sin());
+    }
+    if let Some(path) = ring.finish() {
+        let stroke = tiny_skia::Stroke {
+            width: 1.5,
+            ..Default::default()
+        };
+        pixmap.stroke_path(&path, &paint(color), &stroke, Transform::identity(), None);
     }
 }
 
