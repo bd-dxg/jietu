@@ -105,7 +105,7 @@ fn dim_chunk(data: &mut [u8], k: u32) {
 }
 
 /// 创建上屏用 DIB section（BGRA、top-down），返回内存 DC、位图句柄与像素指针。
-pub(super) fn create_dib_surface(w: u32, h: u32) -> Result<(HDC, HBITMAP, *mut u8), String> {
+pub(crate) fn create_dib_surface(w: u32, h: u32) -> Result<(HDC, HBITMAP, *mut u8), String> {
     unsafe {
         let hdc = CreateCompatibleDC(None);
         if hdc.0.is_null() {
@@ -138,7 +138,16 @@ pub(super) fn create_dib_surface(w: u32, h: u32) -> Result<(HDC, HBITMAP, *mut u
 
 /// RGBA → BGRA 写入目标缓冲区：转换 (x0,y0,rw,rh) 区域，按行多线程分块。
 /// 目标地址用 usize 传递（裸指针不满足 Send）。
-fn convert_rgba_to_bgra(src: &[u8], dst_addr: usize, w: i32, x0: i32, y0: i32, rw: i32, rh: i32, workers: usize) {
+pub(crate) fn convert_rgba_to_bgra(
+    src: &[u8],
+    dst_addr: usize,
+    w: i32,
+    x0: i32,
+    y0: i32,
+    rw: i32,
+    rh: i32,
+    workers: usize,
+) {
     let stride = w as usize * 4;
     let total_rows = rh as usize;
     let convert_row = move |row: usize| {

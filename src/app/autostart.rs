@@ -13,14 +13,15 @@ pub fn autostart_enabled() -> bool {
 }
 
 /// 设置开机自启（SYS-4）：创建/删除登录时以最高权限运行的任务计划。
-pub fn set_autostart(enabled: bool) {
+/// 返回是否成功（通常因权限不足失败，调用方负责提示）。
+pub fn set_autostart(enabled: bool) -> bool {
     if enabled {
         let path = exe_path_quoted();
         run_schtasks(&[
             "/Create", "/F", "/TN", TASK_NAME, "/TR", &path, "/SC", "ONLOGON", "/RL", "HIGHEST",
-        ]);
+        ])
     } else {
-        run_schtasks(&["/Delete", "/F", "/TN", TASK_NAME]);
+        run_schtasks(&["/Delete", "/F", "/TN", TASK_NAME])
     }
 }
 
