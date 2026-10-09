@@ -20,6 +20,31 @@ impl super::Overlay {
         Style::new(editor::PALETTE[self.color_index], self.line_width)
     }
 
+    /// 按下键对应的标注工具（工具切换键配置，M3）。
+    pub(super) fn tool_by_key(&self, vk: u32) -> Option<crate::editor::Tool> {
+        let k = &self.tool_keys;
+        if vk == k.rect {
+            Some(crate::editor::Tool::Rect)
+        } else if vk == k.arrow {
+            Some(crate::editor::Tool::Arrow)
+        } else if vk == k.text {
+            Some(crate::editor::Tool::Text)
+        } else if vk == k.blur {
+            Some(crate::editor::Tool::Blur)
+        } else if vk == k.highlight {
+            Some(crate::editor::Tool::Highlight)
+        } else if vk == k.glow {
+            Some(crate::editor::Tool::Glow)
+        } else {
+            None
+        }
+    }
+
+    /// 切换到指定工具（经工具栏动作统一处理，使其重绘）。
+    pub(super) fn switch_tool(&mut self, t: crate::editor::Tool) {
+        self.apply_action(toolbar::Action::Tool(t));
+    }
+
     pub(super) fn bar_state(&self) -> toolbar::State {
         toolbar::State {
             tool: self.tool,
