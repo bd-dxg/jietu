@@ -5,10 +5,9 @@ use windows::Win32::Foundation::GetLastError;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey, UnregisterHotKey,
 };
-use windows::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MessageBoxW};
-use windows::core::w;
+use windows::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_ICONWARNING, MB_OK};
 
-use super::{App, ID_HOTKEY_PIN, ID_HOTKEY_SHOT, wide};
+use super::{App, ID_HOTKEY_PIN, ID_HOTKEY_SHOT, message_box};
 
 const ERROR_HOTKEY_ALREADY_REGISTERED: u32 = 1409;
 
@@ -35,7 +34,7 @@ impl App {
             } else {
                 format!("热键 {name} 注册失败，错误码 {}.", err.0)
             };
-            unsafe { MessageBoxW(Some(self.hwnd), wide(&text), w!("jietu"), MB_OK | MB_ICONWARNING) };
+            message_box(Some(self.hwnd), &text, MB_OK | MB_ICONWARNING);
         }
     }
 
@@ -47,16 +46,11 @@ impl App {
         {
             self.config.hotkey_warned = true;
             self.config.save();
-            unsafe {
-                MessageBoxW(
-                    Some(self.hwnd),
-                    wide(
-                        "截图(F1)与贴图(F3)热键未使用修饰键，会覆盖其他程序的按键。\n如影响其他软件使用，请在设置中更换热键。",
-                    ),
-                    w!("jietu"),
-                    MB_OK | MB_ICONINFORMATION,
-                )
-            };
+            message_box(
+                Some(self.hwnd),
+                "截图(F1)与贴图(F3)热键未使用修饰键，会覆盖其他程序的按键。\n如影响其他软件使用，请在设置中更换热键。",
+                MB_OK | MB_ICONINFORMATION,
+            );
         }
     }
 

@@ -56,7 +56,7 @@ pub fn run() -> i32 {
     let hwnd = match create_message_window(hinstance) {
         Ok(hwnd) => hwnd,
         Err(msg) => {
-            unsafe { MessageBoxW(None, wide(&msg), w!("jietu"), MB_OK | MB_ICONERROR) };
+            message_box(None, &msg, MB_OK | MB_ICONERROR);
             return 1;
         }
     };
@@ -73,7 +73,7 @@ pub fn run() -> i32 {
 
     // 存入窗口用户数据，wndproc 通过它访问 App。
     unsafe {
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(app) as isize);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut *app as *mut App as isize);
 
         let mut msg = MSG::default();
         loop {
@@ -84,10 +84,11 @@ pub fn run() -> i32 {
             let _ = TranslateMessage(&msg);
             let _ = DispatchMessageW(&msg);
         }
-        // 正常退出：恢复 Box 释放内存，并移除托盘图标。
-        let app = Box::from_raw(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App);
-        app.remove_tray();
     }
+    // 窗口随 WM_CLOSE 销毁（WM_DESTROY → PostQuitMessage 退出循环），这时
+    // 不能再经 GetWindowLongPtrW 取回 Box（句柄已无效，返回值不可靠），
+    // 直接用局部变量恢复 Box 并移除托盘图标。
+    app.remove_tray();
     0
 }
 
@@ -125,18 +126,14 @@ impl App {
                 Ok(screen) => {
                     crate::overlay::Overlay::run(screen, palette, tool_keys, default_tool, hinstance);
                 }
-                Err(e) => unsafe {
-                    let _ = MessageBoxW(None, wide(&format!("抓屏失败：{e}")), w!("jietu"), MB_OK | MB_ICONERROR);
-                },
+                Err(e) => message_box(None, &format!("抓屏失败：{e}"), MB_OK | MB_ICONERROR),
             }
         });
     }
 
     pub fn not_yet(&self, feature: &str, milestone: &str) {
-        unsafe {
-            let text = format!("{feature}尚未实现（{milestone}）。");
-            let _ = MessageBoxW(Some(self.hwnd), wide(&text), w!("jietu"), MB_OK | MB_ICONINFORMATION);
-        }
+        let text = format!("{feature}尚未实现（{milestone}）。");
+        message_box(Some(self.hwnd), &text, MB_OK | MB_ICONINFORMATION);
     }
 
     /// 打开设置面板（M3）：主线程模态运行，防重入。
@@ -253,11 +250,11 @@ pub fn icon_resource() -> PCWSTR {
     PCWSTR::from_raw(1 as *const u16)
 }
 
-/// UTF-16 结尾 NUL 的 PCWSTR（临时值，仅限同一表达式内使用）。
-pub fn wide(s: &str) -> PCWSTR {
-    let mut buf: Vec<u16> = s.encode_utf16().collect();
-    buf.push(0);
-    PCWSTR::from_raw(buf.as_ptr())
+/// 弹消息框（UTF-8 → UTF-16 缓冲随调用存活，避免临时指针悬垂）。
+/// `owner` 为 None 时使用当前活动窗口；`flags` 为 MB_* 组合。
+pub fn message_box(owner: Option<HWND>, text: &str, flags: MESSAGEBOX_STYLE) {
+    let ws: Vec<u16> = text.encode_utf16().chain([0]).collect();
+    unsafe { MessageBoxW(owner, PCWSTR(ws.as_ptr()), w!("jietu"), flags) };
 }
 
 /// 将字符串写入固定长度 u16 数组（用于 NOTIFYICONDATAW.szTip 等）。

@@ -13,7 +13,22 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 /// 创建白十字 + 黑描边彩色光标（32bpp alpha），保证在暗化画面上清晰可见。
+/// 结果缓存进 static：窗口类可多次注册（截图每次重注册），直接新建会泄漏 GDI 图标句柄。
 pub(super) fn create_cross_cursor() -> HCURSOR {
+    let cached = CROSS_CURSOR.load(Ordering::Relaxed);
+    if cached != 0 {
+        return HCURSOR(cached as *mut core::ffi::c_void);
+    }
+    let cur = build_cross_cursor();
+    CROSS_CURSOR.store(cur.0 as isize, Ordering::Relaxed);
+    cur
+}
+
+/// 十字光标句柄缓存（进程内只创建一次，避免每次截图泄漏 GDI 句柄）。
+static CROSS_CURSOR: AtomicIsize = AtomicIsize::new(0);
+
+/// 实际创建十字光标。
+fn build_cross_cursor() -> HCURSOR {
     const S: i32 = 32;
     unsafe {
         let bmi = BITMAPINFO {

@@ -191,7 +191,9 @@ impl Object {
 }
 
 /// 当前绘制工具（EDT-1/EDT-2/EDT-4/EDT-5/EDT-6/聚光）。
+/// `#[repr(u8)]`：`settings::last_tool` 用 `as u8` 持久化/还原判别值，需保证布局稳定。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Tool {
     Rect,
     Arrow,

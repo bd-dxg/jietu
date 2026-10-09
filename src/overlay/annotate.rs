@@ -3,13 +3,12 @@
 //! 撤销/重做、复制与保存。
 
 use windows::Win32::Foundation::{LPARAM, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW, PostMessageW, WM_CLOSE};
-use windows::core::w;
+use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, PostMessageW, WM_CLOSE};
 
 use super::{
     geometry::{SelRect, expand_rect},
     surface::crop_pixmap,
-    toolbar, wide,
+    toolbar,
 };
 use crate::editor::{self, Style};
 use crate::{output, render};
@@ -135,9 +134,7 @@ impl super::Overlay {
             };
             std::thread::spawn(move || {
                 if let Err(e) = output::copy_to_clipboard(&cropped) {
-                    unsafe {
-                        let _ = MessageBoxW(None, wide(&format!("复制失败：{e}")), w!("jietu"), MB_OK | MB_ICONERROR);
-                    }
+                    crate::app::message_box(None, &format!("复制失败：{e}"), MB_OK | MB_ICONERROR);
                 }
             });
         }
@@ -157,7 +154,10 @@ impl super::Overlay {
                 let dir = output::default_save_dir();
                 let _ = std::fs::create_dir_all(&dir);
                 let path = dir.join(output::timestamped_filename("png"));
-                let _ = output::save_png(&cropped, &path);
+                if let Err(e) = output::save_png(&cropped, &path) {
+                    // 保存失败必须提示：静默吞掉会让用户以为截图已保存（OUT-2）
+                    crate::app::message_box(None, &format!("保存失败：{e}"), MB_OK | MB_ICONERROR);
+                }
             });
         }
         self.cancelled = false;

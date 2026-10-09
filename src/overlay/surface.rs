@@ -5,12 +5,15 @@
 use std::mem::size_of;
 
 use tiny_skia::Pixmap;
+use windows::Win32::Foundation::COLORREF;
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC,
-    GetDC, HBITMAP, HDC, ReleaseDC, SRCCOPY, SelectObject,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleDC, CreateDIBSection, DEFAULT_GUI_FONT,
+    DIB_RGB_COLORS, DeleteDC, GetDC, GetStockObject, HBITMAP, HDC, ReleaseDC, SRCCOPY, SelectObject, SetBkMode,
+    SetTextColor, TRANSPARENT, TextOutW,
 };
 
 use super::SelRect;
+use super::geometry::text_rect;
 
 impl super::Overlay {
     /// 上屏指定区域：局部 RGBA → BGRA 写入 DIB section，再用 BitBlt 刷到窗口。
@@ -47,10 +50,25 @@ impl super::Overlay {
             }
             let _ = BitBlt(hdc, x0, y0, rw, rh, Some(self.mem_dc), x0, y0, SRCCOPY);
             if let Some(sel) = self.selection {
-                super::selection::draw_info_text(hdc, sel, w);
+                draw_info_text(hdc, sel, w);
             }
             let _ = ReleaseDC(Some(self.hwnd), hdc);
         }
+    }
+}
+
+/// GDI 文本：显示选区尺寸与坐标（物理像素），位置由 text_rect 确定。
+pub(super) fn draw_info_text(hdc: HDC, sel: SelRect, screen_w: i32) {
+    let r = text_rect(sel, screen_w);
+    unsafe {
+        let font = GetStockObject(DEFAULT_GUI_FONT);
+        let _ = SelectObject(hdc, font);
+        let _ = SetBkMode(hdc, TRANSPARENT);
+        let _ = SetTextColor(hdc, COLORREF(0x00FFFFFF));
+        let text: Vec<u16> = format!("{} × {}   @({},{})", sel.w, sel.h, sel.x, sel.y)
+            .encode_utf16()
+            .collect();
+        let _ = TextOutW(hdc, r.x + 4, r.y + 4, &text);
     }
 }
 

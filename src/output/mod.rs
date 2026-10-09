@@ -6,7 +6,7 @@ use std::mem::size_of;
 use std::path::{Path, PathBuf};
 
 use tiny_skia::Pixmap;
-use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
 use windows::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFOHEADER};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
@@ -58,6 +58,8 @@ pub fn copy_to_clipboard(pixmap: &Pixmap) -> Result<(), String> {
         std::ptr::copy_nonoverlapping(bgra.as_ptr(), (ptr as *mut u8).add(header_size), bgra.len());
         let _ = GlobalUnlock(hdib);
         if SetClipboardData(CF_DIB.0 as u32, Some(HANDLE(hdib.0))).is_err() {
+            // SetClipboardData 失败时剪贴板未接管句柄，必须自行释放
+            let _ = GlobalFree(Some(HGLOBAL(hdib.0)));
             return Err(fail("SetClipboardData CF_DIB 失败".into()));
         }
 
@@ -77,6 +79,7 @@ pub fn copy_to_clipboard(pixmap: &Pixmap) -> Result<(), String> {
         std::ptr::copy_nonoverlapping(png_bytes.as_ptr(), pptr as *mut u8, png_bytes.len());
         let _ = GlobalUnlock(hpng);
         if SetClipboardData(fmt, Some(HANDLE(hpng.0))).is_err() {
+            let _ = GlobalFree(Some(HGLOBAL(hpng.0)));
             return Err(fail("SetClipboardData PNG 失败".into()));
         }
 
