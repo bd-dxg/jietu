@@ -30,12 +30,19 @@ impl super::super::Overlay {
                 b: p,
                 radius: self.blur_radius,
             },
+            Tool::Glow => Kind::Glow { a: p, b: p },
         };
         self.doc.begin();
         self.draft = Some(Object {
             kind,
             style: self.current_style(),
         });
+        // 聚光灯：按下即进入暗化态（选区其余区域变暗、本区域亮），全选区重绘一次
+        if self.tool == Tool::Glow {
+            if let Some(sel) = self.selection {
+                self.repaint(sel);
+            }
+        }
     }
 
     /// 拖动中：草稿终点跟随鼠标（限制在选区内）并重绘。
@@ -64,6 +71,8 @@ impl super::super::Overlay {
                     b: end,
                     radius: *radius,
                 },
+                // 聚光：同区域类，只更新对角点
+                Kind::Glow { a, .. } => Kind::Glow { a: *a, b: end },
                 // 文本不经草稿拖拽（Text 工具走输入状态机）
                 Kind::Text { .. } => return,
             };

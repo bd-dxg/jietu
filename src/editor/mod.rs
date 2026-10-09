@@ -91,6 +91,9 @@ pub enum Kind {
     Highlight { a: Point, b: Point },
     /// EDT-5 高斯模糊：对角两点，`radius` 为模糊半径（由工具栏强度档位映射）。
     Blur { a: Point, b: Point, radius: f32 },
+    /// 高亮（聚光效果，与荧光笔是两种功能）：对角两点。
+    /// 选区其余部分暗化、该区域显示原图亮度，详见渲染层说明。
+    Glow { a: Point, b: Point },
 }
 
 impl Kind {
@@ -108,7 +111,9 @@ impl Kind {
     pub fn control_points(&self) -> Option<[Point; 2]> {
         match *self {
             Kind::Arrow { c1, c2, .. } => Some([c1, c2]),
-            Kind::Rect { .. } | Kind::Text { .. } | Kind::Highlight { .. } | Kind::Blur { .. } => None,
+            Kind::Rect { .. } | Kind::Text { .. } | Kind::Highlight { .. } | Kind::Blur { .. } | Kind::Glow { .. } => {
+                None
+            }
         }
     }
 
@@ -146,8 +151,8 @@ impl Kind {
                 let (x0, y0, x1, y1) = curve::hull_bounds(*from, *c1, *c2, *to);
                 Bounds::around(x0, y0, x1, y1, pad)
             }
-            // 区域类（高亮/模糊）：整块都是绘制内容，外扩 1px 保证脏区取整
-            Kind::Highlight { a, b } | Kind::Blur { a, b, .. } => {
+            // 区域类（高亮/模糊/聚光）：整块都是绘制内容，外扩 1px 保证脏区取整
+            Kind::Highlight { a, b } | Kind::Blur { a, b, .. } | Kind::Glow { a, b } => {
                 Bounds::around(a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y), 1.0)
             }
             // 文本：范围由测量缓存决定（EDT-4），padding 随字号缩放
@@ -185,7 +190,7 @@ impl Object {
     }
 }
 
-/// 当前绘制工具（EDT-1/EDT-2/EDT-4/EDT-5/EDT-6）。
+/// 当前绘制工具（EDT-1/EDT-2/EDT-4/EDT-5/EDT-6/聚光）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
     Rect,
@@ -194,11 +199,20 @@ pub enum Tool {
     Text,
     Highlight,
     Blur,
+    /// 聚光高亮：选区其余暗化、该区域恢复原图亮度。
+    Glow,
 }
 
 impl Tool {
     /// 工具栏顺序。
-    pub const ALL: [Tool; 5] = [Tool::Rect, Tool::Arrow, Tool::Text, Tool::Highlight, Tool::Blur];
+    pub const ALL: [Tool; 6] = [
+        Tool::Rect,
+        Tool::Arrow,
+        Tool::Text,
+        Tool::Highlight,
+        Tool::Blur,
+        Tool::Glow,
+    ];
 }
 
 /// 新建对象默认线宽（物理像素，连续可调：滚轮 / 二级工具栏）。
@@ -426,7 +440,8 @@ mod tests {
     #[test]
     fn tool_all_includes_text() {
         assert!(Tool::ALL.contains(&Tool::Text));
-        assert_eq!(Tool::ALL.len(), 5);
+        assert!(Tool::ALL.contains(&Tool::Glow));
+        assert_eq!(Tool::ALL.len(), 6);
     }
 
     #[test]
