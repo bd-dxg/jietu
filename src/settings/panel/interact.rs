@@ -65,6 +65,7 @@ impl Panel {
             // 热键/工具键：点右侧控件区进入捕获
             RowId::HotkeyShot
             | RowId::HotkeyPin
+            | RowId::HotkeyBorder
             | RowId::ToolRect
             | RowId::ToolArrow
             | RowId::ToolText
@@ -78,6 +79,7 @@ impl Panel {
             }
             RowId::HotkeyShot
             | RowId::HotkeyPin
+            | RowId::HotkeyBorder
             | RowId::ToolRect
             | RowId::ToolArrow
             | RowId::ToolText
@@ -112,6 +114,15 @@ impl Panel {
             RowId::ThemeDark => {
                 self.end_capture();
                 self.set_theme(ThemeSetting::Dark);
+            }
+            // 贴图位置（M2b）：改工作副本，面板关闭时统一写回
+            RowId::PinPosOriginal => {
+                self.end_capture();
+                self.config.pin_position = crate::settings::PinPosition::Original;
+            }
+            RowId::PinPosCenter => {
+                self.end_capture();
+                self.config.pin_position = crate::settings::PinPosition::Center;
             }
             _ => self.end_capture(),
         }
@@ -156,6 +167,10 @@ impl Panel {
                     RowId::HotkeyPin => {
                         self.config.hotkey.pin_key = vk;
                         self.config.hotkey.pin_modifiers = mods;
+                    }
+                    RowId::HotkeyBorder => {
+                        self.config.hotkey.border_key = vk;
+                        self.config.hotkey.border_modifiers = mods;
                     }
                     // 工具切换键：仅绑定虚拟键（覆盖层内按下即切工具，无需修饰键）
                     RowId::ToolRect => self.config.tool_keys.rect = vk,

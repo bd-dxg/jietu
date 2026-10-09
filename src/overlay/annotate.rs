@@ -2,7 +2,8 @@
 //! 标注状态与输出（EDT-1/2/7、OUT-1/2/3）：当前工具与样式、工具栏动作、
 //! 撤销/重做、复制与保存。
 
-use windows::Win32::Foundation::{LPARAM, WPARAM};
+use windows::Win32::Foundation::{GlobalFree, LPARAM, WPARAM};
+use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, PostMessageW, WM_CLOSE};
 
 use super::{
@@ -74,6 +75,8 @@ impl super::Overlay {
             }
             toolbar::Action::Undo => return self.on_undo(),
             toolbar::Action::Redo => return self.on_redo(),
+            // PIN-1：贴图按钮 → 选区贴图后覆盖层自行关闭（不复绘）
+            toolbar::Action::Pin => return self.on_pin(),
         }
         // 仅工具栏自身外观发生变化
         let bar = self.bar.as_ref().map(|b| b.rect);
@@ -124,6 +127,50 @@ impl super::Overlay {
         let mut cropped = crop_pixmap(&self.original, sel)?;
         render::bake_objects(&mut cropped, self.doc.objects(), (sel.x, sel.y));
         Some(cropped)
+    }
+
+    /// PIN-1：F3 / 工具栏贴图按钮 → 选区（含标注）跨线程交给主窗口贴图，并关闭覆盖层。
+    /// 载荷：GlobalAlloc[u32 w][u32 h][RGBA]，主窗口创建贴图窗口后释放（app/mod.rs WM_PIN_FROM_EDITOR）。
+    pub(super) fn on_pin(&mut self) {
+        if let Some(sel) = self.selection
+            && let Some(cropped) = self.baked_selection(sel)
+        {
+            let (w, h) = (cropped.width(), cropped.height());
+            let px_total = w as usize * h as usize * 4;
+            unsafe {
+                // 载荷头：u32 w + u32 h + i32 x + i32 y（选区在屏幕上的位置，PIN 定位用）
+                let Ok(hg) = GlobalAlloc(GMEM_MOVEABLE, 16 + px_total) else {
+                    // 分配失败：提示并保留覆盖层（用户可重按 F3 重试，审查 P2-1）
+                    crate::app::message_box(None, "贴图内存分配失败，请关闭部分贴图后重试。", MB_OK | MB_ICONERROR);
+                    return;
+                };
+                let ptr = GlobalLock(hg);
+                if ptr.is_null() {
+                    let _ = GlobalFree(Some(hg));
+                    crate::app::message_box(None, "贴图内存锁失败。", MB_OK | MB_ICONERROR);
+                    return;
+                }
+                let hp = ptr as *mut u32;
+                *hp = w;
+                *hp.add(1) = h;
+                let sp = hp.add(2) as *mut i32;
+                *sp = sel.x;
+                *sp.add(1) = sel.y;
+                std::ptr::copy_nonoverlapping(cropped.data().as_ptr(), (ptr as *mut u8).add(16), px_total);
+                let _ = GlobalUnlock(hg);
+                let _ = PostMessageW(
+                    Some(self.main_hwnd),
+                    crate::app::WM_PIN_FROM_EDITOR,
+                    WPARAM(hg.0 as usize),
+                    LPARAM(0),
+                );
+            }
+        }
+        // 与复制/保存一致：贴图即完成，关闭覆盖层
+        self.cancelled = false;
+        unsafe {
+            let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
     }
 
     /// Enter / Ctrl+C：复制到剪贴板并关闭（OUT-1）。

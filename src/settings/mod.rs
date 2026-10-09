@@ -47,6 +47,10 @@ pub struct HotkeyConfig {
     pub pin_key: u32,
     /// 贴图热键修饰键位标志
     pub pin_modifiers: u32,
+    /// 贴图边框开关热键（默认 Ctrl+F3；0 = 未启用）
+    pub border_key: u32,
+    /// 贴图边框开关热键修饰键位标志
+    pub border_modifiers: u32,
     /// 遗留字段（旧版本两键共享修饰键，TOML 键名仍为 `modifiers`）：仅加载迁移用，不再写入。
     #[serde(default, skip_serializing, rename = "modifiers")]
     pub legacy_modifiers: u32,
@@ -59,6 +63,8 @@ impl Default for HotkeyConfig {
             screenshot_modifiers: 0,
             pin_key: 0x72,
             pin_modifiers: 0,
+            border_key: 0x72,    // Ctrl+F3
+            border_modifiers: 2, // MOD_CONTROL
             legacy_modifiers: 0,
         }
     }
@@ -90,6 +96,19 @@ impl Default for ToolKeys {
     }
 }
 
+/// 贴图初始位置（M2b）：编辑器内贴选区（PIN-1）时显示在截图原位置或屏幕中央；
+/// 剪贴板贴图（PIN-2）无「原位置」，始终居中。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PinPosition {
+    /// 在截图选区原位置显示（默认）。
+    #[default]
+    #[serde(rename = "original")]
+    Original,
+    /// 在虚拟屏中央显示。
+    #[serde(rename = "center")]
+    Center,
+}
+
 /// 根配置。所有字段带默认值，旧配置文件缺字段时自动补齐。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -104,6 +123,10 @@ pub struct Config {
     pub tool_keys: ToolKeys,
     /// 是否已提示过无修饰键热键风险（避免每次启动弹窗）。
     pub hotkey_warned: bool,
+    /// 贴图初始位置（M2b）。
+    pub pin_position: PinPosition,
+    /// 贴图 1px 蓝色边框（M2b，默认开）。
+    pub pin_border: bool,
 }
 
 impl Default for Config {
@@ -115,6 +138,8 @@ impl Default for Config {
             hotkey: HotkeyConfig::default(),
             tool_keys: ToolKeys::default(),
             hotkey_warned: false,
+            pin_position: PinPosition::Original,
+            pin_border: true,
         }
     }
 }

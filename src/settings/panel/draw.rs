@@ -130,11 +130,14 @@ fn draw_row(pixmap: &mut Pixmap, panel: &Panel, row: &super::controls::Row, idx:
     }
 }
 
-/// 开关：胶囊轨道 + 白色滑钮。
+/// 开关：胶囊轨道 + 白色滑钮。状态按行类型取。
 fn draw_toggle(pixmap: &mut Pixmap, panel: &Panel, row: &super::controls::Row) {
     let p = panel.palette;
     let s = panel.scale;
-    let on = panel.autostart_on;
+    let on = match row.id {
+        RowId::Autostart => panel.autostart_on,
+        _ => false,
+    };
     let c = &row.control;
     let tw = (36.0 * s) as i32;
     let th = (18.0 * s) as i32;
@@ -204,6 +207,7 @@ fn keycap_text(panel: &Panel, id: RowId) -> String {
     match id {
         RowId::HotkeyShot => key_name(hk.screenshot_key, hk.screenshot_modifiers),
         RowId::HotkeyPin => key_name(hk.pin_key, hk.pin_modifiers),
+        RowId::HotkeyBorder => key_name(hk.border_key, hk.border_modifiers),
         RowId::ToolRect => key_name(tk.rect, 0),
         RowId::ToolArrow => key_name(tk.arrow, 0),
         RowId::ToolText => key_name(tk.text, 0),
@@ -222,6 +226,8 @@ fn draw_radio(pixmap: &mut Pixmap, panel: &Panel, row: &super::controls::Row) {
         RowId::ThemeFollow => panel.config.theme == ThemeSetting::Follow,
         RowId::ThemeLight => panel.config.theme == ThemeSetting::Light,
         RowId::ThemeDark => panel.config.theme == ThemeSetting::Dark,
+        RowId::PinPosOriginal => panel.config.pin_position == crate::settings::PinPosition::Original,
+        RowId::PinPosCenter => panel.config.pin_position == crate::settings::PinPosition::Center,
         _ => false,
     };
     let c = &row.control;

@@ -260,3 +260,39 @@ pub(super) fn draw_undo_icon(pixmap: &mut Pixmap, r: SelRect, color: [u8; 4], mi
         );
     }
 }
+
+/// 贴图按钮图标（PIN-1，M2b）：图钉（圆头 + 杆 + 底部锥形）。
+pub(super) fn pin_icon(pixmap: &mut Pixmap, r: SelRect, color: [u8; 4]) {
+    let paint = paint_of(color);
+    let cx = r.x as f32 + r.w as f32 / 2.0;
+    let head_y = r.y as f32 + 9.0;
+    let head_r = 3.4;
+    // 圆头
+    let mut head = PathBuilder::new();
+    head.push_circle(cx, head_y, head_r);
+    if let Some(path) = head.finish() {
+        pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
+    }
+    // 杆（头到底部锥之间的竖线）
+    let stroke = tiny_skia::Stroke {
+        width: 1.8,
+        line_cap: tiny_skia::LineCap::Round,
+        ..Default::default()
+    };
+    let mut shaft = PathBuilder::new();
+    shaft.move_to(cx, head_y + head_r);
+    shaft.line_to(cx, (r.y + r.h) as f32 - 9.0);
+    if let Some(path) = shaft.finish() {
+        pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+    // 底部锥形（倒三角）
+    let base_y = (r.y + r.h) as f32 - 6.5;
+    let mut tri = PathBuilder::new();
+    tri.move_to(cx - 4.2, base_y - 2.8);
+    tri.line_to(cx + 4.2, base_y - 2.8);
+    tri.line_to(cx, base_y + 2.8);
+    tri.close();
+    if let Some(path) = tri.finish() {
+        pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
+    }
+}

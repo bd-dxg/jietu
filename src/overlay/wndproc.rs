@@ -122,6 +122,7 @@ pub(super) unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARA
             }
             match wparam.0 as u32 {
                 0x1B => overlay.on_cancel(),              // Esc
+                0x72 => overlay.on_pin(),                 // PIN-1：F3 贴选区（截图期间全局 F3 已撤销）
                 0x0D => overlay.on_copy(),                // Enter
                 0x43 if ctrl_down() => overlay.on_copy(), // Ctrl+C
                 0x53 if ctrl_down() => overlay.on_save(), // Ctrl+S
