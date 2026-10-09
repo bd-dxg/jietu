@@ -8,11 +8,13 @@ use windows::Win32::UI::Input::Ime::{GCS_COMPSTR, GCS_RESULTSTR, IME_COMPOSITION
 use crate::editor::{Kind, Object, Point};
 use crate::render;
 
-use super::geometry::{expand_rect, union_rect};
+use super::geometry::expand_rect;
 use super::text_edit_state::TextEdit;
 
 impl super::Overlay {
     /// 进入文本输入（Text 工具下点击选区内空白，EDT-4）。
+    /// 撤销快照不在此时建立：输入期间其它操作（如滚轮微调对象）可能抢先 begin，
+    /// 覆盖 pending 导致提交时快照丢失，故统一在 `commit_text` 修改文档前建立。
     pub(super) fn begin_text_input(&mut self, x: i32, y: i32) {
         let edit = TextEdit {
             pos: Point::new(x as f32, y as f32),
@@ -41,7 +43,6 @@ impl super::Overlay {
         if self.text_edit.is_some() {
             self.commit_text();
         }
-        self.doc.begin();
         self.selected = Some(i);
         self.text_edit = Some(TextEdit {
             pos,
@@ -63,9 +64,9 @@ impl super::Overlay {
     }
 
     /// 提交当前输入（EDT-4）：空文本不创建（编辑时清空 = 删除对象）；Enter / 点击别处触发。
+    /// 修改文档前才建撤销快照（begin），避免输入期间其它 begin 覆盖；结束后重绘整个选区。
     pub(super) fn commit_text(&mut self) {
         let Some(edit) = self.text_edit.take() else { return };
-        let dirty = edit.region();
         if edit.chars.is_empty() {
             // 编辑已有对象时全部删掉 = 删除该对象；新建时空文本直接丢弃
             if let Some(i) = edit.obj_index {
@@ -73,10 +74,8 @@ impl super::Overlay {
                 self.doc.remove(i);
                 self.doc.commit(true);
                 self.selected = None;
-                if let Some(sel) = self.selection {
-                    self.repaint(expand_rect(sel, 2));
-                }
             }
+            self.repaint_whole_selection();
             return;
         }
         let text: String = edit.chars.iter().collect();
@@ -89,28 +88,35 @@ impl super::Overlay {
         };
         match edit.obj_index {
             None => {
+                self.doc.begin();
                 self.doc.push(Object {
                     kind,
                     style: self.current_style(),
                 });
+                self.doc.commit(true);
                 self.selected = Some(self.doc.objects().len() - 1);
             }
             Some(i) => {
+                self.doc.begin();
                 self.doc.objects_mut()[i].kind = kind;
+                self.doc.commit(true);
             }
         }
-        self.doc.commit(true);
-        // 输入框区域已被提交内容覆盖，重绘清理
-        let dirty = union_rect(Some(expand_rect(dirty, 2)), None).unwrap();
-        self.repaint(dirty);
+        self.repaint_whole_selection();
     }
 
     /// 取消当前输入（Esc，EDT-4）：编辑已有对象时不入撤销栈，原对象恢复显示。
     pub(super) fn cancel_text(&mut self) {
-        let Some(edit) = self.text_edit.take() else { return };
-        let dirty = expand_rect(edit.region(), 2);
+        let Some(_edit) = self.text_edit.take() else { return };
         self.doc.commit(false);
-        self.repaint(dirty);
+        self.repaint_whole_selection();
+    }
+
+    /// 文本输入变化后的重绘：覆盖整个选区，彻底避免文本变短/光标位移时的尾部残留。
+    fn repaint_whole_selection(&mut self) {
+        if let Some(sel) = self.selection {
+            self.repaint(expand_rect(sel, 2));
+        }
     }
 
     /// WM_CHAR：普通字符（含标点/数字），跳过控制字符。
@@ -169,6 +175,8 @@ impl super::Overlay {
             0x0D if shift || ctrl => edit.insert_char('\n'),
             0x0D => self.commit_text(), // Enter：提交
             0x1B => self.cancel_text(), // Esc：取消
+            // Ctrl+Z：放弃本次未提交输入（已提交文本走全局撤销 Ctrl+Z）
+            0x5A if ctrl => self.cancel_text(),
             _ => handled = false,
         }
         if handled {
@@ -177,26 +185,16 @@ impl super::Overlay {
         handled
     }
 
-    /// 输入框重绘（新旧区域并集）。
+    /// 输入框重绘：整个选区重绘（文本变短/光标位移时旧像素可能落在新 region 外，
+    /// 局部重绘必然残留；文本输入是低频按键事件，选区级重绘成本可接受）。
     pub(super) fn repaint_text_edit(&mut self) {
-        let region = self.text_edit.as_ref().map(|e| e.region());
-        if let Some(r) = region {
-            let r = expand_rect(r, 2);
-            // 与已选中对象区域并集，避免光标位移残留
-            let dirty = if let Some(s) = self.selected_clip() {
-                union_rect(Some(r), Some(s)).unwrap_or(r)
-            } else {
-                r
-            };
-            self.repaint(dirty);
-        }
+        self.repaint_whole_selection();
     }
 }
 
 /// 从 IME 上下文读取组合串/结果串（UTF-16 → String）。
 fn ime_string(hwnd: windows::Win32::Foundation::HWND, what: IME_COMPOSITION_STRING) -> String {
     unsafe {
-        use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::Input::Ime::{ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext};
         let ctx = ImmGetContext(hwnd);
         if ctx.0.is_null() {
@@ -210,7 +208,6 @@ fn ime_string(hwnd: windows::Win32::Foundation::HWND, what: IME_COMPOSITION_STRI
             ImmGetCompositionStringW(ctx, what, Some(buf.as_mut_ptr() as *mut core::ffi::c_void), len as u32);
             String::from_utf16_lossy(&buf)
         };
-        let _ = HWND;
         let _ = ImmReleaseContext(hwnd, ctx);
         out
     }

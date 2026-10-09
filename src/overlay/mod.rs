@@ -8,6 +8,7 @@
 //! `annotate` 标注与输出、`toolbar` 工具栏。
 
 mod annotate;
+mod control;
 mod cursor;
 pub(crate) mod geometry;
 mod interaction;
@@ -202,9 +203,7 @@ impl Overlay {
         let hwnd = match Self::create_window(hinstance) {
             Ok(h) => h,
             Err(e) => {
-                unsafe {
-                    let _ = MessageBoxW(None, wide(&e), w!("jietu"), MB_OK | MB_ICONERROR);
-                }
+                crate::app::message_box(None, &e, MB_OK | MB_ICONERROR);
                 return false;
             }
         };
@@ -263,11 +262,4 @@ impl Overlay {
         }
         !cancelled
     }
-}
-
-/// UTF-16 结尾 NUL 的 PCWSTR（临时值，仅限同一表达式内使用）。
-pub fn wide(s: &str) -> PCWSTR {
-    let mut buf: Vec<u16> = s.encode_utf16().collect();
-    buf.push(0);
-    PCWSTR::from_raw(buf.as_ptr())
 }

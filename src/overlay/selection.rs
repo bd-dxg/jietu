@@ -3,23 +3,17 @@
 //! 底图复位 → 标注对象 → 选中箭头的控制柄 → 选区装饰 → 工具栏，一次 `repaint` 完成并上屏。
 
 use tiny_skia::{Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
-use windows::Win32::Foundation::COLORREF;
-use windows::Win32::Graphics::Gdi::{
-    DEFAULT_GUI_FONT, GetStockObject, HDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
-};
 
 use super::geometry::{SelRect, expand_rect, intersect_rect, same_rect, text_rect, union_rect};
+use super::pick::draw_curve_handles;
 use super::surface::{blit_region, restore_region};
 use super::{textinput, toolbar};
-use crate::editor::{Kind, Object, Point};
 use crate::render;
 
 /// 脏区域外扩（覆盖边框、手柄与信息文字）。
 pub(super) const DIRTY_PAD: i32 = 60;
 /// 手柄边长。
 const HANDLE_SIZE: i32 = 7;
-/// 曲线控制柄半径（含描边，需 ≤ 对象包围盒的余量）。
-const CTRL_RADIUS: f32 = 4.5;
 const ACCENT: u8 = 26; // 主题蓝
 const ACCENT_G: u8 = 115;
 const ACCENT_B: u8 = 232;
@@ -92,11 +86,14 @@ impl super::Overlay {
                     // 逐个恢复聚光区域（草稿也包含在内；与 overlap 求交后回贴原图）
                     for obj in self.doc.objects().iter().chain(self.draft.iter()) {
                         if let crate::editor::Kind::Glow { a, b } = obj.kind {
+                            // 重新计算区域四边（floor/ceil 取整，不能用截断：浮点值可能为负或非整数）
+                            let (gx0, gy0) = (a.x.min(b.x).floor(), a.y.min(b.y).floor());
+                            let (gx1, gy1) = (a.x.max(b.x).ceil(), a.y.max(b.y).ceil());
                             let gr = SelRect {
-                                x: a.x.min(b.x) as i32,
-                                y: a.y.min(b.y) as i32,
-                                w: (a.x - b.x).abs() as i32,
-                                h: (a.y - b.y).abs() as i32,
+                                x: gx0 as i32,
+                                y: gy0 as i32,
+                                w: (gx1 - gx0) as i32,
+                                h: (gy1 - gy0) as i32,
                             };
                             if let Some(part) = intersect_rect(overlap, gr) {
                                 blit_region(&mut self.display, &self.original, part);
@@ -177,61 +174,6 @@ impl super::Overlay {
     }
 }
 
-/// 选中箭头的控制柄（EDT-3）：控制点处画圆点，与端点之间用虚线辅助线连接。
-fn draw_curve_handles(pixmap: &mut Pixmap, obj: &Object) {
-    let (Some(cps), Kind::Arrow { from, to, .. }) = (obj.kind.control_points(), &obj.kind) else {
-        return;
-    };
-    let [c1, c2] = cps;
-    dashed_line(pixmap, *from, c1);
-    dashed_line(pixmap, c2, *to);
-    for p in [c1, c2] {
-        let mut pb = PathBuilder::new();
-        pb.push_circle(p.x, p.y, CTRL_RADIUS);
-        let Some(path) = pb.finish() else {
-            continue;
-        };
-        let mut fill = Paint::default();
-        fill.set_color_rgba8(255, 255, 255, 255);
-        pixmap.fill_path(&path, &fill, tiny_skia::FillRule::Winding, Transform::identity(), None);
-        let mut edge = Paint::default();
-        edge.set_color_rgba8(ACCENT, ACCENT_G, ACCENT_B, 255);
-        let stroke = Stroke {
-            width: 1.5,
-            ..Default::default()
-        };
-        pixmap.stroke_path(&path, &edge, &stroke, Transform::identity(), None);
-    }
-}
-
-/// 虚线辅助线（5px 实 / 4px 虚）：tiny-skia 无 dash，手动拆成小段。
-fn dashed_line(pixmap: &mut Pixmap, a: Point, b: Point) {
-    let (dx, dy) = (b.x - a.x, b.y - a.y);
-    let len = (dx * dx + dy * dy).sqrt();
-    if len < 1.0 {
-        return;
-    }
-    let (ux, uy) = (dx / len, dy / len);
-    let mut pb = PathBuilder::new();
-    let mut t = 0.0;
-    while t < len {
-        let end = (t + 5.0).min(len);
-        pb.move_to(a.x + ux * t, a.y + uy * t);
-        pb.line_to(a.x + ux * end, a.y + uy * end);
-        t += 9.0;
-    }
-    let Some(path) = pb.finish() else {
-        return;
-    };
-    let mut paint = Paint::default();
-    paint.set_color_rgba8(255, 255, 255, 200);
-    let stroke = Stroke {
-        width: 1.0,
-        ..Default::default()
-    };
-    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
-}
-
 /// 画选区边框。
 fn draw_rect(pixmap: &mut Pixmap, sel: SelRect) {
     let Some(rect) = Rect::from_xywh(
@@ -300,21 +242,6 @@ fn draw_handles(pixmap: &mut Pixmap, sel: SelRect) {
                 pixmap.fill_path(&p, &paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
             }
         }
-    }
-}
-
-/// GDI 文本：显示选区尺寸与坐标（物理像素），位置由 text_rect 确定。
-pub(super) fn draw_info_text(hdc: HDC, sel: SelRect, screen_w: i32) {
-    let r = text_rect(sel, screen_w);
-    unsafe {
-        let font = GetStockObject(DEFAULT_GUI_FONT);
-        let _ = SelectObject(hdc, font);
-        let _ = SetBkMode(hdc, TRANSPARENT);
-        let _ = SetTextColor(hdc, COLORREF(0x00FFFFFF));
-        let text: Vec<u16> = format!("{} × {}   @({},{})", sel.w, sel.h, sel.x, sel.y)
-            .encode_utf16()
-            .collect();
-        let _ = TextOutW(hdc, r.x + 4, r.y + 4, &text);
     }
 }
 

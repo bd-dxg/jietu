@@ -245,6 +245,55 @@ pub const MOD_CTRL_BIT: u32 = 1 << 1;
 pub const MOD_SHIFT_BIT: u32 = 1 << 2;
 pub const MOD_WIN_BIT: u32 = 1 << 3;
 
+/// 检查新键是否与其它已配置快捷键冲突（热键：键+修饰都相同；工具键：虚拟键相同即冲突）。
+/// 返回冲突项名称；被检查项自身旧值不算冲突。
+pub(super) fn conflict_for(
+    hk: &crate::settings::HotkeyConfig,
+    tk: &crate::settings::ToolKeys,
+    id: RowId,
+    vk: u32,
+    mods: u32,
+) -> Option<&'static str> {
+    // (当前项自值，用于跳过自身)
+    let (self_vk, self_mods) = match id {
+        RowId::HotkeyShot => (hk.screenshot_key, hk.screenshot_modifiers),
+        RowId::HotkeyPin => (hk.pin_key, hk.pin_modifiers),
+        RowId::ToolRect => (tk.rect, 0),
+        RowId::ToolArrow => (tk.arrow, 0),
+        RowId::ToolText => (tk.text, 0),
+        RowId::ToolBlur => (tk.blur, 0),
+        RowId::ToolHighlight => (tk.highlight, 0),
+        RowId::ToolGlow => (tk.glow, 0),
+        _ => (u32::MAX, u32::MAX),
+    };
+    // 已配置键位：热键按「键+修饰」比较，工具键按「虚拟键」比较
+    let pairs: [(&str, u32, u32, bool); 8] = [
+        ("截图", hk.screenshot_key, hk.screenshot_modifiers, true),
+        ("贴图", hk.pin_key, hk.pin_modifiers, true),
+        ("工具·矩形", tk.rect, 0, false),
+        ("工具·箭头", tk.arrow, 0, false),
+        ("工具·文本", tk.text, 0, false),
+        ("工具·模糊", tk.blur, 0, false),
+        ("工具·荧光笔", tk.highlight, 0, false),
+        ("工具·聚光灯", tk.glow, 0, false),
+    ];
+    for (name, kv, km, is_hotkey) in pairs {
+        if kv == self_vk && km == self_mods {
+            continue; // 自身旧值
+        }
+        let hit = if is_hotkey {
+            kv == vk && km == mods
+        } else {
+            // 工具键/跨类比较：按下即按虚拟键触发，故键相同即冲突
+            kv == vk
+        };
+        if hit {
+            return Some(name);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
