@@ -9,24 +9,26 @@
 
 mod annotate;
 mod cursor;
-mod geometry;
+pub(crate) mod geometry;
 mod interaction;
 mod pick;
 mod selection;
-mod surface;
+pub(crate) mod surface;
 mod text_edit_state;
 mod textinput;
-mod toolbar;
+pub(crate) mod toolbar;
 mod wndproc;
 
 use tiny_skia::Pixmap;
 use windows::Win32::Foundation::{HINSTANCE, HWND};
 use windows::Win32::Graphics::Gdi::{DeleteDC, DeleteObject, HBITMAP, HDC, InvalidateRect, UpdateWindow};
+use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
 use crate::capture::CapturedScreen;
 use crate::editor::{self, Document, Object, Point, Tool};
+use crate::theme::Palette;
 
 use geometry::SelRect;
 use interaction::{Drag, Phase};
@@ -40,6 +42,8 @@ pub struct Overlay {
     pub original: Pixmap,
     pub dimmed: Pixmap,
     pub display: Pixmap,
+    /// 当前主题调色板（截图开始时由设置解析，M3）。
+    pub palette: &'static Palette,
     pub selection: Option<SelRect>,
     phase: Phase,
     drag: Option<Drag>,
@@ -47,6 +51,8 @@ pub struct Overlay {
     doc: Document,
     /// 当前工具与样式（EDT-7）。
     tool: Tool,
+    /// 工具切换键配置（M3：数字键 1-5 切换标注工具）。
+    tool_keys: crate::settings::ToolKeys,
     color_index: usize,
     /// 新建对象的默认线宽（滚轮 / 二级工具栏可连续调整）。
     line_width: f32,
@@ -58,6 +64,9 @@ pub struct Overlay {
     round: bool,
     /// 正在拖拽、尚未提交的标注对象。
     draft: Option<Object>,
+    /// 上次左键按下是否启动了选区内空白绘制（双击完成截图判据，M3）。
+    /// 不用 `draft.is_some()`：双击第一击的草稿会在弹起时被提交/丢弃。
+    pub down_started_draw: bool,
     /// 当前选中的对象索引（EDT-7）；控制柄仅在选中时显示（EDT-3）。
     selected: Option<usize>,
     /// 正在拖动的曲线控制柄：(控制点索引, 按下时的坐标)（EDT-3）。
@@ -90,7 +99,12 @@ impl Drop for Overlay {
 }
 
 impl Overlay {
-    fn new(mut capture: CapturedScreen) -> Result<Self, String> {
+    fn new(
+        mut capture: CapturedScreen,
+        palette: &'static Palette,
+        tool_keys: crate::settings::ToolKeys,
+        default_tool: Tool,
+    ) -> Result<Self, String> {
         let (w, h) = (capture.width, capture.height);
         let Some(size) = tiny_skia::IntSize::from_wh(w, h) else {
             return Err("虚拟屏幕尺寸非法".into());
@@ -110,11 +124,13 @@ impl Overlay {
             original,
             dimmed,
             display,
+            palette,
             selection: None,
             phase: Phase::Adjusting,
             drag: None,
             doc: Document::new(),
-            tool: Tool::Rect,
+            tool: default_tool, // 记住上次工具（M3），首次为矩形
+            tool_keys,
             color_index: 1, // 默认红色
             line_width: editor::DEFAULT_LINE_WIDTH,
             blur_radius: editor::DEFAULT_BLUR_RADIUS,
@@ -122,6 +138,7 @@ impl Overlay {
             filled: false,
             round: false,
             draft: None,
+            down_started_draw: false,
             selected: None,
             ctrl_drag: None,
             text_edit: None,
@@ -150,7 +167,9 @@ impl Overlay {
             };
             let _ = RegisterClassW(&wc);
             let hwnd = CreateWindowExW(
-                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                // 截图期间需接收键盘（Esc 取消 / 回车复制 / Ctrl+C 等）：不用 WS_EX_NOACTIVATE，
+                // 否则窗口无输入焦点，WM_KEYDOWN/WM_HOTKEY 之外的键（如 Esc、回车）收不到（M3）。
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
                 WINDOW_CLASS,
                 w!("jietu.overlay"),
                 WS_POPUP,
@@ -170,7 +189,13 @@ impl Overlay {
 
     /// 显示覆盖层并阻塞运行，直到截图完成或取消。
     /// 返回是否完成（false = 取消）。
-    pub fn run(capture: CapturedScreen, hinstance: HINSTANCE) -> bool {
+    pub fn run(
+        capture: CapturedScreen,
+        palette: &'static Palette,
+        tool_keys: crate::settings::ToolKeys,
+        default_tool: Tool,
+        hinstance: HINSTANCE,
+    ) -> bool {
         let t_show = std::time::Instant::now();
         let (origin_x, origin_y) = (capture.origin_x, capture.origin_y);
         let (vw, vh) = (capture.width as i32, capture.height as i32);
@@ -184,7 +209,7 @@ impl Overlay {
             }
         };
 
-        let mut overlay = match Self::new(capture) {
+        let mut overlay = match Self::new(capture, palette, tool_keys, default_tool) {
             Ok(o) => o,
             Err(_) => {
                 unsafe {
@@ -204,6 +229,8 @@ impl Overlay {
             let _ = InvalidateRect(Some(hwnd), None, false);
             let _ = UpdateWindow(hwnd);
             let _ = SetForegroundWindow(hwnd);
+            // 显式把输入焦点交给覆盖层，确保 Esc/回车/快捷键生效（WS_EX_NOACTIVATE 已移除）
+            let _ = SetFocus(Some(hwnd));
             if std::env::var_os("JIETU_TIMING").is_some() {
                 eprintln!("[jietu] 覆盖层创建到显示完成 {:?}", t_show.elapsed());
             }
@@ -225,6 +252,9 @@ impl Overlay {
                 }
             }
         }
+
+        // 记录本会话最后使用的工具（下次截图默认沿用，首次为矩形，M3）
+        crate::settings::last_tool_store(unsafe { (*raw).tool });
 
         let cancelled = unsafe { (*raw).cancelled };
         unsafe {

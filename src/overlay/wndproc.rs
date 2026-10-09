@@ -55,7 +55,8 @@ pub(super) unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARA
             overlay.on_cancel();
             LRESULT(0)
         }
-        // 双击控制柄恢复直线（EDT-3）；双击文本对象进入再编辑（EDT-4）
+        // 双击：命中对象 → 编辑文本/恢复直线（EDT-3/EDT-4）；
+        // 否则选区空白内双击 = 完成截图（复制，M3，替代回车）
         WM_LBUTTONDBLCLK => {
             let x = (lparam.0 & 0xFFFF) as u16 as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
@@ -63,8 +64,15 @@ pub(super) unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARA
                 .hit_object(x, y)
                 .map(|i| overlay.begin_edit_text(i))
                 .unwrap_or(false);
-            if !edited {
-                overlay.reset_curve_at(x, y);
+            let handled = if edited { true } else { overlay.reset_curve_at(x, y) };
+            if !handled {
+                // 双击第一击在选区内空白处按下（start_draw），作废草稿并完成截图
+                if let Some(sel) = overlay.selection {
+                    if sel.contains(x, y) && overlay.down_started_draw {
+                        overlay.draft = None;
+                        overlay.on_copy();
+                    }
+                }
             }
             LRESULT(0)
         }
@@ -126,7 +134,13 @@ pub(super) unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARA
                     }
                 }
                 0x59 if ctrl_down() => overlay.on_redo(), // Ctrl+Y
-                _ => {}
+                _ => {
+                    // 工具切换键（M3）：任意键都查映射（不限于数字键），
+                    // 以便设置面板可把工具键改为字母等
+                    if let Some(t) = overlay.tool_by_key(wparam.0 as u32) {
+                        overlay.switch_tool(t);
+                    }
+                }
             }
             LRESULT(0)
         }

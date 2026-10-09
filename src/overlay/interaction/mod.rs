@@ -49,6 +49,7 @@ impl super::Overlay {
         if self.text_edit.is_some() {
             self.commit_text();
         }
+        self.down_started_draw = false;
         let new = match self.selection {
             None => Some(self.begin_select(x, y)),
             Some(sel) => {
@@ -95,6 +96,7 @@ impl super::Overlay {
                     } else {
                         // 空白处按下：用当前工具绘制标注（EDT-1/EDT-2/EDT-3）
                         self.set_selected(None);
+                        self.down_started_draw = true;
                         self.start_draw(x, y);
                         return;
                     }
