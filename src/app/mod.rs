@@ -7,10 +7,15 @@ mod hotkey;
 pub mod popmenu;
 mod tray;
 
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use windows::Win32::Foundation::{
+    ERROR_ALREADY_EXISTS, GetLastError, GlobalFree, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
@@ -22,6 +27,15 @@ pub const WINDOW_CLASS: PCWSTR = w!("jietu.hidden");
 const MUTEX_NAME: PCWSTR = w!("Local\\jietu.single.instance");
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_ACTIVATE: u32 = WM_APP + 2; // 单实例唤起已有实例
+/// 覆盖层线程 → 主窗口：贴图载荷（GlobalAlloc: u32 w + u32 h + RGBA）（PIN-1）。
+pub const WM_PIN_FROM_EDITOR: u32 = WM_APP + 3;
+/// 覆盖层线程 → 主窗口：截图已结束，重注册被撤销的贴图热键（PIN-1 防 F3 双触发）。
+pub const WM_OVERLAY_DONE: u32 = WM_APP + 4;
+/// 贴图窗口 → 主窗口：贴图内边框快捷键已切换（更新默认配置，M2b）。
+pub const WM_PIN_BORDER_CHANGED: u32 = WM_APP + 5;
+
+/// 截图覆盖层是否在运行（跨线程；截图期间撤销全局贴图热键）。
+static OVERLAY_RUNNING: AtomicBool = AtomicBool::new(false);
 
 pub const ID_TRAY: u32 = 1;
 pub const ID_HOTKEY_SHOT: i32 = 101;
@@ -70,6 +84,8 @@ pub fn run() -> i32 {
     app.init_tray();
     app.maybe_warn_no_modifier_clash();
     app.register_hotkeys();
+    // 贴图内边框快捷键（M2b，非全局热键：仅贴图窗口聚焦时生效）
+    crate::pin::set_border_key(app.config.hotkey.border_key, app.config.hotkey.border_modifiers);
 
     // 存入窗口用户数据，wndproc 通过它访问 App。
     unsafe {
@@ -115,6 +131,11 @@ fn acquire_single_instance() -> bool {
 impl App {
     pub fn start_capture(&self) {
         let hinstance = self.hinstance.0 as usize;
+        let main_hwnd = self.hwnd.0 as usize; // HWND 非 Send，跨线程传原生值
+        // 截图期间撤销贴图全局热键：F3 在覆盖层内走「贴选区」（PIN-1），
+        // 否则 WM_HOTKEY 与覆盖层 WM_KEYDOWN 同时收到 F3 会双重触发（一次贴选区一次贴剪贴板）。
+        OVERLAY_RUNNING.store(true, Ordering::Release);
+        let _ = unsafe { UnregisterHotKey(Some(self.hwnd), ID_HOTKEY_PIN) };
         // 截图开始时解析一次主题调色板（M3：跟随设置，浅色模式工具栏为浅色）
         let palette = crate::theme::palette(crate::theme::resolve(self.config.theme));
         // 工具切换键配置 + 默认工具（记住上次使用，M3）
@@ -122,12 +143,16 @@ impl App {
         let default_tool = crate::settings::last_tool();
         std::thread::spawn(move || {
             let hinstance = HINSTANCE(hinstance as *mut _);
+            let main_hwnd = HWND(main_hwnd as *mut _);
             match crate::capture::capture_virtual_screen() {
                 Ok(screen) => {
-                    crate::overlay::Overlay::run(screen, palette, tool_keys, default_tool, hinstance);
+                    crate::overlay::Overlay::run(screen, palette, tool_keys, default_tool, hinstance, main_hwnd);
                 }
                 Err(e) => message_box(None, &format!("抓屏失败：{e}"), MB_OK | MB_ICONERROR),
             }
+            OVERLAY_RUNNING.store(false, Ordering::Release);
+            // 通知主线程重注册贴图热键（截图已结束）
+            let _ = unsafe { PostMessageW(Some(main_hwnd), WM_OVERLAY_DONE, WPARAM(0), LPARAM(0)) };
         });
     }
 
@@ -151,6 +176,19 @@ impl App {
         self.config = cfg.clone();
         self.config.save();
         self.register_hotkeys();
+        // 贴图内边框快捷键（M2b）：立即下发给贴图窗口（含已存在的）
+        crate::pin::set_border_key(cfg.hotkey.border_key, cfg.hotkey.border_modifiers);
+    }
+
+    /// 贴图边框开关（贴图窗口内快捷键 → 本消息触发）：
+    /// 切全部贴图的边框显示，并把新状态写入默认配置（后续新贴图跟随）。
+    pub fn toggle_pin_border(&self) {
+        let next = crate::pin::toggle_border();
+        if let Some(next) = next {
+            let mut cfg = self.config.clone();
+            cfg.pin_border = next;
+            cfg.save();
+        }
     }
 
     /// WM_SETTINGCHANGE：主题变更时刷新（SYS-6）。
@@ -225,6 +263,32 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let id = wparam.0 as i32;
             if let Some(app) = app_from(hwnd) {
                 app.handle_hotkey(id);
+            }
+            LRESULT(0)
+        }
+        WM_PIN_FROM_EDITOR => {
+            // 覆盖层线程送来的贴图载荷：由本（主）线程创建贴图窗口并释放内存
+            let hg = HGLOBAL(wparam.0 as *mut core::ffi::c_void);
+            let Some(app) = app_from(hwnd) else {
+                // 主窗口异常（理论不可达）：释放载荷防泄漏
+                unsafe {
+                    let _ = GlobalFree(Some(hg));
+                }
+                return LRESULT(0);
+            };
+            unsafe { crate::pin::from_payload(hg, app.hinstance, app.config.pin_position, app.config.pin_border) };
+            LRESULT(0)
+        }
+        WM_OVERLAY_DONE => {
+            if let Some(app) = app_from(hwnd) {
+                app.register_hotkeys(); // 重注册截图期间撤销的贴图热键
+            }
+            LRESULT(0)
+        }
+        WM_PIN_BORDER_CHANGED => {
+            // 贴图窗口内快捷键切了边框：更新默认配置（M2b）
+            if let Some(app) = app_from(hwnd) {
+                app.toggle_pin_border();
             }
             LRESULT(0)
         }

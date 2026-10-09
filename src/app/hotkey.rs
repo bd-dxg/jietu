@@ -58,7 +58,10 @@ impl App {
     pub fn handle_hotkey(&self, id: i32) {
         match id {
             ID_HOTKEY_SHOT => self.start_capture(),
-            ID_HOTKEY_PIN => self.not_yet("贴图功能", "M2b 里程碑"),
+            // PIN-2：非截图状态按 F3 → 剪贴板图片贴到屏幕（截图期间该热键已被撤销）
+            ID_HOTKEY_PIN => {
+                crate::pin::from_clipboard(self.hinstance, self.config.pin_position, self.config.pin_border)
+            }
             _ => {}
         }
     }

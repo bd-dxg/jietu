@@ -49,6 +49,8 @@ pub enum RowId {
     HotkeyShot,
     /// 贴图热键。
     HotkeyPin,
+    /// 贴图边框切换热键（M2b，默认 Ctrl+F3）。
+    HotkeyBorder,
     /// 工具切换键（M3）：矩形 / 箭头 / 文本 / 模糊 / 荧光笔 / 高亮。
     ToolRect,
     ToolArrow,
@@ -58,6 +60,10 @@ pub enum RowId {
     ToolGlow,
     /// 无修饰键风险提示（只读）。
     Widenote,
+    /// 贴图位置：截图原位置（M2b）。
+    PinPosOriginal,
+    /// 贴图位置：屏幕中间（M2b）。
+    PinPosCenter,
     /// 主题：跟随系统。
     ThemeFollow,
     /// 主题：浅色。
@@ -143,10 +149,13 @@ fn section_rows(section: Section, y0: i32, s: f32, items: &mut Vec<Item>) {
         Section::General => {
             push(RowId::Autostart, RowKind::Toggle, "开机自启", &mut y, items);
             push(RowId::Lang, RowKind::Readonly, "语言", &mut y, items);
+            push(RowId::PinPosOriginal, RowKind::Radio, "贴图位置·原位置", &mut y, items);
+            push(RowId::PinPosCenter, RowKind::Radio, "贴图位置·屏幕中间", &mut y, items);
         }
         Section::Hotkeys => {
             push(RowId::HotkeyShot, RowKind::KeyCap, "截图", &mut y, items);
             push(RowId::HotkeyPin, RowKind::KeyCap, "贴图", &mut y, items);
+            push(RowId::HotkeyBorder, RowKind::KeyCap, "贴图边框·窗口内", &mut y, items);
             push(RowId::ToolRect, RowKind::KeyCap, "工具·矩形", &mut y, items);
             push(RowId::ToolArrow, RowKind::KeyCap, "工具·箭头", &mut y, items);
             push(RowId::ToolText, RowKind::KeyCap, "工具·文本", &mut y, items);
@@ -258,6 +267,7 @@ pub(super) fn conflict_for(
     let (self_vk, self_mods) = match id {
         RowId::HotkeyShot => (hk.screenshot_key, hk.screenshot_modifiers),
         RowId::HotkeyPin => (hk.pin_key, hk.pin_modifiers),
+        RowId::HotkeyBorder => (hk.border_key, hk.border_modifiers),
         RowId::ToolRect => (tk.rect, 0),
         RowId::ToolArrow => (tk.arrow, 0),
         RowId::ToolText => (tk.text, 0),
@@ -267,9 +277,10 @@ pub(super) fn conflict_for(
         _ => (u32::MAX, u32::MAX),
     };
     // 已配置键位：热键按「键+修饰」比较，工具键按「虚拟键」比较
-    let pairs: [(&str, u32, u32, bool); 8] = [
+    let pairs: [(&str, u32, u32, bool); 9] = [
         ("截图", hk.screenshot_key, hk.screenshot_modifiers, true),
         ("贴图", hk.pin_key, hk.pin_modifiers, true),
+        ("贴图边框", hk.border_key, hk.border_modifiers, true),
         ("工具·矩形", tk.rect, 0, false),
         ("工具·箭头", tk.arrow, 0, false),
         ("工具·文本", tk.text, 0, false),
@@ -336,10 +347,16 @@ mod tests {
                 })
                 .collect();
             let expected = match sec {
-                Section::General => vec![RowId::Autostart, RowId::Lang],
+                Section::General => vec![
+                    RowId::Autostart,
+                    RowId::Lang,
+                    RowId::PinPosOriginal,
+                    RowId::PinPosCenter,
+                ],
                 Section::Hotkeys => vec![
                     RowId::HotkeyShot,
                     RowId::HotkeyPin,
+                    RowId::HotkeyBorder,
                     RowId::ToolRect,
                     RowId::ToolArrow,
                     RowId::ToolText,

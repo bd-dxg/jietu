@@ -77,6 +77,8 @@ pub struct Overlay {
     /// 当前工具栏布局（选区存在时才有）。
     bar: Option<toolbar::Toolbar>,
     pub hwnd: HWND,
+    /// 主消息窗口句柄（贴图载荷/exel 完成后通知用，PIN-1）。
+    pub main_hwnd: HWND,
     pub cancelled: bool,
     /// 上屏用内存 DC（持有 DIB section，BGRA 像素直接写入 dib_bits）。
     mem_dc: HDC,
@@ -145,6 +147,7 @@ impl Overlay {
             text_edit: None,
             bar: None,
             hwnd: HWND::default(),
+            main_hwnd: HWND::default(),
             cancelled: false,
             mem_dc,
             dib_bmp,
@@ -196,6 +199,7 @@ impl Overlay {
         tool_keys: crate::settings::ToolKeys,
         default_tool: Tool,
         hinstance: HINSTANCE,
+        main_hwnd: HWND,
     ) -> bool {
         let t_show = std::time::Instant::now();
         let (origin_x, origin_y) = (capture.origin_x, capture.origin_y);
@@ -218,6 +222,7 @@ impl Overlay {
             }
         };
         overlay.hwnd = hwnd;
+        overlay.main_hwnd = main_hwnd;
         let raw = Box::into_raw(Box::new(overlay));
 
         unsafe {

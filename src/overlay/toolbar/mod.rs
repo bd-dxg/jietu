@@ -47,6 +47,8 @@ pub enum Action {
     ToggleRound,
     Undo,
     Redo,
+    /// PIN-1：把选区（含标注）贴为置顶窗口。
+    Pin,
 }
 
 /// 工具栏布局：整体矩形 + 各元素命中区。
@@ -107,6 +109,8 @@ pub fn layout(sel: SelRect, screen_w: i32, screen_h: i32) -> Toolbar {
     c.sep();
     item(&mut c, BTN, BTN, Action::Undo);
     item(&mut c, BTN, BTN, Action::Redo);
+    c.sep();
+    item(&mut c, BTN, BTN, Action::Pin);
 
     let w = c.x - GAP + PAD;
     let x = sel.x.clamp(4, (screen_w - w - 4).max(4));
@@ -195,5 +199,6 @@ mod tests {
         assert_eq!(center(368), Some(Action::ToggleRound));
         assert_eq!(center(403), Some(Action::Undo));
         assert_eq!(center(433), Some(Action::Redo));
+        assert_eq!(center(468), Some(Action::Pin)); // 贴图按钮（M2b，Pin 组单独分隔）
     }
 }
