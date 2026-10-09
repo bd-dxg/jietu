@@ -12,9 +12,10 @@ impl Kind {
             Kind::Arrow { from, c1, c2, to } => {
                 curve::dist_to_polyline(&curve::flatten(*from, *c1, *c2, *to), q) <= tol
             }
-            // 区域类（高亮/模糊）：整块区域都可命中（同填充矩形），便于选中拖动
+            // 区域类（高亮/模糊/聚光）：整块区域都可命中（同填充矩形），便于选中拖动
             Kind::Highlight { a, b } => hit_rect(*a, *b, true, q, tol),
             Kind::Blur { a, b, .. } => hit_rect(*a, *b, true, q, tol),
+            Kind::Glow { a, b } => hit_rect(*a, *b, true, q, tol),
             // 文本：整个文字矩形都可命中（同填充矩形），尺寸来自测量缓存
             Kind::Text { pos, size, .. } => {
                 let (a, b) = super::text::rect(*pos, *size);

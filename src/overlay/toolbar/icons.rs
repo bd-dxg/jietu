@@ -61,6 +61,39 @@ pub(super) fn text_icon(pixmap: &mut Pixmap, r: SelRect, color: [u8; 4]) {
     }
 }
 
+/// 聚光高亮按钮图标（M3）：外框圆角矩形 + 中心光斑（区域恢复亮度）
+pub(super) fn glow_icon(pixmap: &mut Pixmap, r: SelRect, color: [u8; 4]) {
+    let inset = 6.0;
+    let box_rect = SelRect {
+        x: (r.x as f32 + inset) as i32,
+        y: (r.y as f32 + inset) as i32,
+        w: (r.w as f32 - inset * 2.0) as i32,
+        h: (r.h as f32 - inset * 2.0) as i32,
+    };
+    rounded_rect_outline(pixmap, box_rect, 3.0, color);
+    // 中心光斑：外晕 + 实心圆
+    let cx = r.x as f32 + r.w as f32 / 2.0;
+    let cy = r.y as f32 + r.h as f32 / 2.0;
+    let rad = (r.w as f32 * 0.18).clamp(2.0, 5.0);
+    let mut halo = PathBuilder::new();
+    halo.push_circle(cx, cy, rad + 2.2);
+    if let Some(p) = halo.finish() {
+        let fill = paint_of([color[0], color[1], color[2], (color[3] as u32 / 2) as u8]);
+        pixmap.fill_path(&p, &fill, tiny_skia::FillRule::Winding, Transform::identity(), None);
+    }
+    let mut core = PathBuilder::new();
+    core.push_circle(cx, cy, rad);
+    if let Some(p) = core.finish() {
+        pixmap.fill_path(
+            &p,
+            &paint_of(color),
+            tiny_skia::FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+}
+
 /// 高亮按钮图标：斜置半透明荧光黄色块（模拟画笔笔迹）。
 pub(super) fn highlight_icon(pixmap: &mut Pixmap, r: SelRect, alpha: u8) {
     let (x0, x1) = (r.x as f32 + 6.0, (r.x + r.w) as f32 - 6.0);
@@ -115,14 +148,14 @@ pub(super) fn blur_icon(pixmap: &mut Pixmap, r: SelRect, color: [u8; 4]) {
     }
 }
 
-pub(super) fn paint_of(color: [u8; 4]) -> Paint<'static> {
+pub(crate) fn paint_of(color: [u8; 4]) -> Paint<'static> {
     let mut p = Paint::default();
     p.set_color_rgba8(color[0], color[1], color[2], color[3]);
     p
 }
 
 /// 填充圆角矩形（可选描边）。
-pub(super) fn rounded_rect(pixmap: &mut Pixmap, r: SelRect, radius: f32, fill: [u8; 4], border: Option<[u8; 4]>) {
+pub(crate) fn rounded_rect(pixmap: &mut Pixmap, r: SelRect, radius: f32, fill: [u8; 4], border: Option<[u8; 4]>) {
     let Some(path) = rounded_path(r, radius) else {
         return;
     };
@@ -143,7 +176,7 @@ pub(super) fn rounded_rect(pixmap: &mut Pixmap, r: SelRect, radius: f32, fill: [
 }
 
 /// 仅描边的圆角矩形（选中态外框）。
-pub(super) fn rounded_rect_outline(pixmap: &mut Pixmap, r: SelRect, radius: f32, color: [u8; 4]) {
+pub(crate) fn rounded_rect_outline(pixmap: &mut Pixmap, r: SelRect, radius: f32, color: [u8; 4]) {
     let Some(path) = rounded_path(r, radius) else {
         return;
     };
@@ -154,7 +187,7 @@ pub(super) fn rounded_rect_outline(pixmap: &mut Pixmap, r: SelRect, radius: f32,
     pixmap.stroke_path(&path, &paint_of(color), &stroke, Transform::identity(), None);
 }
 
-fn rounded_path(r: SelRect, radius: f32) -> Option<tiny_skia::Path> {
+pub(crate) fn rounded_path(r: SelRect, radius: f32) -> Option<tiny_skia::Path> {
     let rect = Rect::from_ltrb(
         r.x as f32 + 0.5,
         r.y as f32 + 0.5,

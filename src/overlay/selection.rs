@@ -77,10 +77,35 @@ impl super::Overlay {
         };
 
         // 1) 底图复位（CAP-3：预生成暗图 + 选区回贴原图）
+        // 聚光模式：选区内保持暗图，仅聚光对象/草稿区域恢复原图亮度（其余区域继续暗化）。
+        // 判断包含正在拖拽的草稿，保证第一笔拖动时即进入暗化状态。
         restore_region(&mut self.display, &self.dimmed, region);
         if let Some(sel) = self.selection {
             if let Some(overlap) = intersect_rect(region, sel) {
-                blit_region(&mut self.display, &self.original, overlap);
+                let glow_on = self
+                    .doc
+                    .objects()
+                    .iter()
+                    .chain(self.draft.iter())
+                    .any(|o| matches!(o.kind, crate::editor::Kind::Glow { .. }));
+                if glow_on {
+                    // 逐个恢复聚光区域（草稿也包含在内；与 overlap 求交后回贴原图）
+                    for obj in self.doc.objects().iter().chain(self.draft.iter()) {
+                        if let crate::editor::Kind::Glow { a, b } = obj.kind {
+                            let gr = SelRect {
+                                x: a.x.min(b.x) as i32,
+                                y: a.y.min(b.y) as i32,
+                                w: (a.x - b.x).abs() as i32,
+                                h: (a.y - b.y).abs() as i32,
+                            };
+                            if let Some(part) = intersect_rect(overlap, gr) {
+                                blit_region(&mut self.display, &self.original, part);
+                            }
+                        }
+                    }
+                } else {
+                    blit_region(&mut self.display, &self.original, overlap);
+                }
             }
         }
         // 2) 标注对象（含正在拖拽的草稿）；二次编辑中的文本对象隐藏，由输入框呈现（EDT-4）
@@ -114,7 +139,7 @@ impl super::Overlay {
         let state = self.bar_state();
         if let Some(bar) = &self.bar {
             if intersect_rect(expand_rect(bar.rect, 2), region).is_some() {
-                toolbar::draw(&mut self.display, bar, &state);
+                toolbar::draw(&mut self.display, bar, &state, self.palette);
             }
         }
         self.present_region(region);

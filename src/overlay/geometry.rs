@@ -34,7 +34,7 @@ impl SelRect {
 }
 
 /// 点是否在矩形内（半开区间）。
-pub(super) fn in_rect(r: SelRect, x: i32, y: i32) -> bool {
+pub(crate) fn in_rect(r: SelRect, x: i32, y: i32) -> bool {
     x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h
 }
 

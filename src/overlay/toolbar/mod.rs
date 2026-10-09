@@ -2,12 +2,13 @@
 //! 覆盖层工具栏（EDT-7）：布局与命中测试；绘制见 `draw` 子模块。
 
 mod draw;
-mod icons;
+pub(crate) mod icons;
 
 use tiny_skia::Pixmap;
 
 use crate::editor::{PALETTE, Tool};
 use crate::overlay::geometry::{INFO_OFFSET, INFO_TEXT_H, SelRect};
+use crate::theme::Palette;
 
 /// 工具栏高度（绘制与布局共用）。
 pub const H: i32 = 34;
@@ -23,14 +24,6 @@ pub(crate) const SEP: i32 = 9;
 pub(crate) const OFFSET: i32 = INFO_OFFSET;
 /// 内边距。
 pub(crate) const PAD: i32 = 5;
-
-/// 架构风格：颜色常量。
-pub(crate) const BG: [u8; 4] = [32, 32, 32, 240];
-pub(crate) const BORDER: [u8; 4] = [255, 255, 255, 60];
-pub(crate) const ICON: [u8; 4] = [255, 255, 255, 235];
-pub(crate) const ICON_DIM: [u8; 4] = [255, 255, 255, 70];
-pub(crate) const ACCENT: [u8; 4] = [26, 115, 232, 255];
-pub(crate) const ACCENT_SOFT: [u8; 4] = [26, 115, 232, 90];
 
 /// 工具栏当前状态（决定高亮与可用性）。
 #[derive(Clone, Copy, PartialEq)]
@@ -148,8 +141,8 @@ pub fn layout(sel: SelRect, screen_w: i32, screen_h: i32) -> Toolbar {
 }
 
 /// 把工具栏绘制到覆盖层像素图（委托给 draw 子模块）。
-pub fn draw(pixmap: &mut Pixmap, bar: &Toolbar, state: &State) {
-    draw::render(pixmap, bar, state);
+pub fn draw(pixmap: &mut Pixmap, bar: &Toolbar, state: &State, palette: &Palette) {
+    draw::render(pixmap, bar, state, palette);
 }
 
 #[cfg(test)]
@@ -195,11 +188,12 @@ mod tests {
         assert_eq!(center(78), Some(Action::Tool(Tool::Text)));
         assert_eq!(center(108), Some(Action::Tool(Tool::Highlight)));
         assert_eq!(center(138), Some(Action::Tool(Tool::Blur)));
-        assert_eq!(center(171), Some(Action::Color(0)));
-        assert_eq!(center(197), Some(Action::Color(1)));
-        assert_eq!(center(295), Some(Action::ToggleFill));
-        assert_eq!(center(325), Some(Action::ToggleRound));
-        assert_eq!(center(373), Some(Action::Undo));
-        assert_eq!(center(403), Some(Action::Redo));
+        assert_eq!(center(168), Some(Action::Tool(Tool::Glow)));
+        assert_eq!(center(201), Some(Action::Color(0)));
+        assert_eq!(center(227), Some(Action::Color(1)));
+        assert_eq!(center(338), Some(Action::ToggleFill));
+        assert_eq!(center(368), Some(Action::ToggleRound));
+        assert_eq!(center(403), Some(Action::Undo));
+        assert_eq!(center(433), Some(Action::Redo));
     }
 }

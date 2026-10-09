@@ -56,6 +56,7 @@ pub(super) fn is_degenerate(obj: &Object) -> bool {
         // 区域类（高亮/模糊）：过小视为误触
         Kind::Highlight { a, b } => (a.x - b.x).abs() < 2.0 && (a.y - b.y).abs() < 2.0,
         Kind::Blur { a, b, .. } => (a.x - b.x).abs() < 2.0 && (a.y - b.y).abs() < 2.0,
+        Kind::Glow { a, b } => (a.x - b.x).abs() < 2.0 && (a.y - b.y).abs() < 2.0,
         // 文本：空文本在提交时已拦截，进入文档的均为有效对象
         Kind::Text { .. } => false,
     }
@@ -144,14 +145,14 @@ impl super::Overlay {
         }
     }
 
-    /// 双击控制柄恢复直线（EDT-3）。
-    pub(super) fn reset_curve_at(&mut self, x: i32, y: i32) {
+    /// 双击控制柄恢复直线（EDT-3）；命中并处理返回 true。
+    pub(super) fn reset_curve_at(&mut self, x: i32, y: i32) -> bool {
         if self.hit_control(x, y).is_none() {
-            return;
+            return false;
         }
         self.ctrl_drag = None; // 双击前那次按下启动的拖动作废
         let Some(i) = self.selected else {
-            return;
+            return true;
         };
         let before = self.selected_clip();
         self.doc.begin();
@@ -165,6 +166,7 @@ impl super::Overlay {
                 self.repaint(expand_rect(bar.rect, 2));
             }
         }
+        true
     }
 
     /// 选中对象占据的像素区域。
@@ -203,7 +205,7 @@ impl super::Overlay {
                     self.font_size = (self.font_size + step).clamp(10.0, 96.0);
                 }
                 crate::editor::Tool::Blur => self.blur_radius = (self.blur_radius + step).clamp(4.0, 64.0),
-                crate::editor::Tool::Highlight => {}
+                crate::editor::Tool::Highlight | crate::editor::Tool::Glow => {}
             }
         }
     }
@@ -233,6 +235,8 @@ impl super::Overlay {
                     }
                     changed
                 }
+                // 高亮/聚光：无可调属性
+                Kind::Highlight { .. } | Kind::Glow { .. } => false,
                 // 文本：字号连续可调，同步重建测量缓存（EDT-4）
                 Kind::Text {
                     font_size, size, text, ..
@@ -246,7 +250,6 @@ impl super::Overlay {
                     }
                     changed
                 }
-                Kind::Highlight { .. } => false,
             }
         };
         self.doc.commit(changed);

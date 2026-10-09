@@ -4,6 +4,7 @@
 
 pub mod autostart;
 mod hotkey;
+pub mod popmenu;
 mod tray;
 
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
@@ -37,6 +38,8 @@ pub struct App {
     pub config: Config,
     pub hwnd: HWND,
     pub hinstance: HINSTANCE,
+    /// 设置面板是否已打开（防托盘菜单重入，SYS-3）。
+    pub settings_open: bool,
 }
 
 /// 入口：单实例检查 → 创建消息窗口 → 托盘 / 热键 → 消息循环。
@@ -62,6 +65,7 @@ pub fn run() -> i32 {
         config,
         hwnd,
         hinstance,
+        settings_open: false,
     });
     app.init_tray();
     app.maybe_warn_no_modifier_clash();
@@ -110,11 +114,16 @@ fn acquire_single_instance() -> bool {
 impl App {
     pub fn start_capture(&self) {
         let hinstance = self.hinstance.0 as usize;
+        // 截图开始时解析一次主题调色板（M3：跟随设置，浅色模式工具栏为浅色）
+        let palette = crate::theme::palette(crate::theme::resolve(self.config.theme));
+        // 工具切换键配置 + 默认工具（记住上次使用，M3）
+        let tool_keys = self.config.tool_keys.clone();
+        let default_tool = crate::settings::last_tool();
         std::thread::spawn(move || {
             let hinstance = HINSTANCE(hinstance as *mut _);
             match crate::capture::capture_virtual_screen() {
                 Ok(screen) => {
-                    crate::overlay::Overlay::run(screen, hinstance);
+                    crate::overlay::Overlay::run(screen, palette, tool_keys, default_tool, hinstance);
                 }
                 Err(e) => unsafe {
                     let _ = MessageBoxW(None, wide(&format!("抓屏失败：{e}")), w!("jietu"), MB_OK | MB_ICONERROR);
@@ -128,6 +137,23 @@ impl App {
             let text = format!("{feature}尚未实现（{milestone}）。");
             let _ = MessageBoxW(Some(self.hwnd), wide(&text), w!("jietu"), MB_OK | MB_ICONINFORMATION);
         }
+    }
+
+    /// 打开设置面板（M3）：主线程模态运行，防重入。
+    pub fn open_settings(&mut self) {
+        if self.settings_open {
+            return;
+        }
+        self.settings_open = true;
+        crate::settings::panel::run(self);
+        self.settings_open = false;
+    }
+
+    /// 应用设置面板的工作副本：写回配置、保存、重注册热键。
+    pub fn apply_panel_config(&mut self, cfg: &Config) {
+        self.config = cfg.clone();
+        self.config.save();
+        self.register_hotkeys();
     }
 
     /// WM_SETTINGCHANGE：主题变更时刷新（SYS-6）。
