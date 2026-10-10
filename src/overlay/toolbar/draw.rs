@@ -17,7 +17,8 @@ pub fn render(pixmap: &mut Pixmap, bar: &Toolbar, state: &State, p: &Palette) {
     rounded_rect(pixmap, bar.rect, 7.0, p.bg, Some(p.border));
 
     // 组分隔线：画在每个组首个元素左侧的空白处
-    for &index in &[4usize, 9, 11, 16] {
+    // 组划分（hits 索引）：[工具 0-5][颜色 6-10][填充 11 圆角 12][撤销 13 重做 14][贴图 15 长截图 16]
+    for &index in &[6usize, 11, 13, 15] {
         let Some((first, _)) = bar.hits.get(index) else {
             continue;
         };
@@ -87,6 +88,8 @@ pub fn render(pixmap: &mut Pixmap, bar: &Toolbar, state: &State, p: &Palette) {
             Action::Redo => draw_undo_icon(pixmap, *r, if state.can_redo { p.icon } else { p.icon_dim }, true),
             // PIN-1：贴图（图钉）
             Action::Pin => pin_icon(pixmap, *r, p.icon),
+            // M4：长截图（向下展开的页面 + 箭头）
+            Action::Longshot => longshot_icon(pixmap, *r, p.icon),
         }
     }
 }

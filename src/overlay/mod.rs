@@ -37,6 +37,17 @@ use text_edit_state::TextEdit;
 
 const WINDOW_CLASS: PCWSTR = w!("jietu.overlay");
 
+/// 覆盖层运行结果（M4 长截图视口选取复用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayResult {
+    /// 截图完成（已复制/保存/贴图）。
+    Done,
+    /// 用户取消。
+    Cancelled,
+    /// 长截图视口选取完成：屏幕坐标 (x, y, w, h)。
+    Viewport((i32, i32, u32, u32)),
+}
+
 /// 覆盖层运行时状态（完整实现分散在各子模块的 `impl Overlay` 中）。
 pub struct Overlay {
     pub capture: CapturedScreen,
@@ -80,6 +91,8 @@ pub struct Overlay {
     /// 主消息窗口句柄（贴图载荷/exel 完成后通知用，PIN-1）。
     pub main_hwnd: HWND,
     pub cancelled: bool,
+    /// 长截图触发（M4）：工具栏按钮 / S 键设置屏幕坐标选区，随后覆盖层关闭。
+    pub viewport: Option<(i32, i32, u32, u32)>,
     /// 上屏用内存 DC（持有 DIB section，BGRA 像素直接写入 dib_bits）。
     mem_dc: HDC,
     /// DIB section 位图句柄。
@@ -149,6 +162,7 @@ impl Overlay {
             hwnd: HWND::default(),
             main_hwnd: HWND::default(),
             cancelled: false,
+            viewport: None,
             mem_dc,
             dib_bmp,
             dib_bits,
@@ -191,8 +205,8 @@ impl Overlay {
         }
     }
 
-    /// 显示覆盖层并阻塞运行，直到截图完成或取消。
-    /// 返回是否完成（false = 取消）。
+    /// 显示覆盖层并阻塞运行，直到截图完成、取消或触发长截图。
+    /// 返回类型区分三种结果（普通截图 / 取消 / 长截图视口选取）。
     pub fn run(
         capture: CapturedScreen,
         palette: &'static Palette,
@@ -200,7 +214,7 @@ impl Overlay {
         default_tool: Tool,
         hinstance: HINSTANCE,
         main_hwnd: HWND,
-    ) -> bool {
+    ) -> OverlayResult {
         let t_show = std::time::Instant::now();
         let (origin_x, origin_y) = (capture.origin_x, capture.origin_y);
         let (vw, vh) = (capture.width as i32, capture.height as i32);
@@ -208,7 +222,7 @@ impl Overlay {
             Ok(h) => h,
             Err(e) => {
                 crate::app::message_box(None, &e, MB_OK | MB_ICONERROR);
-                return false;
+                return OverlayResult::Cancelled;
             }
         };
 
@@ -218,7 +232,7 @@ impl Overlay {
                 unsafe {
                     let _ = DestroyWindow(hwnd);
                 }
-                return false;
+                return OverlayResult::Cancelled;
             }
         };
         overlay.hwnd = hwnd;
@@ -261,10 +275,17 @@ impl Overlay {
         crate::settings::last_tool_store(unsafe { (*raw).tool });
 
         let cancelled = unsafe { (*raw).cancelled };
+        let viewport = unsafe { (*raw).viewport };
         unsafe {
             let _ = Box::from_raw(raw);
             let _ = DestroyWindow(hwnd);
         }
-        !cancelled
+        if cancelled {
+            OverlayResult::Cancelled
+        } else if let Some(vp) = viewport {
+            OverlayResult::Viewport(vp)
+        } else {
+            OverlayResult::Done
+        }
     }
 }

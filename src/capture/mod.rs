@@ -72,6 +72,73 @@ fn swap_rb_parallel(buf: &mut [u8]) {
     });
 }
 
+/// 抓取屏幕指定区域（长截图逐帧采集视口用，LNG-2/3）。
+/// 屏幕坐标为物理像素；区域越界部分自动裁切（BitBlt 源在屏幕外返回黑像素）。
+pub fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<CapturedScreen, String> {
+    unsafe {
+        if w == 0 || h == 0 {
+            return Err("区域尺寸为 0，无法抓屏".into());
+        }
+        let hdc_screen = GetDC(None);
+        if hdc_screen.0.is_null() {
+            return Err("GetDC 失败".into());
+        }
+        let hdc_mem = CreateCompatibleDC(None);
+        if hdc_mem.0.is_null() {
+            let _ = ReleaseDC(None, hdc_screen);
+            return Err("CreateCompatibleDC 失败".into());
+        }
+
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w as i32,
+                biHeight: -(h as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            bmiColors: [Default::default()],
+        };
+        let mut bits: *mut core::ffi::c_void = null_mut();
+        let hbmp = match CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) {
+            Ok(hbmp) => hbmp,
+            Err(e) => {
+                let _ = DeleteDC(hdc_mem);
+                let _ = ReleaseDC(None, hdc_screen);
+                return Err(format!("CreateDIBSection 失败：{e}"));
+            }
+        };
+
+        let _ = SelectObject(hdc_mem, hbmp.into());
+        // 长截图不需要 CAPTUREBLT：抓取普通窗口内容即可（分层窗口内容由目标页面自绘）。
+        if BitBlt(hdc_mem, 0, 0, w as i32, h as i32, Some(hdc_screen), x, y, SRCCOPY).is_err() {
+            let _ = DeleteObject(hbmp.into());
+            let _ = DeleteDC(hdc_mem);
+            let _ = ReleaseDC(None, hdc_screen);
+            return Err("BitBlt 失败".into());
+        }
+
+        let len = (w * h * 4) as usize;
+        let mut rgba = vec![0u8; len];
+        std::ptr::copy_nonoverlapping(bits as *const u8, rgba.as_mut_ptr(), len);
+        swap_rb_parallel(&mut rgba);
+
+        let _ = DeleteObject(hbmp.into());
+        let _ = DeleteDC(hdc_mem);
+        let _ = ReleaseDC(None, hdc_screen);
+
+        Ok(CapturedScreen {
+            width: w,
+            height: h,
+            origin_x: x,
+            origin_y: y,
+            rgba,
+        })
+    }
+}
+
 /// 抓取整个虚拟屏幕（一次，冻结画面）。
 pub fn capture_virtual_screen() -> Result<CapturedScreen, String> {
     let t0 = std::time::Instant::now();

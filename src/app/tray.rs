@@ -9,9 +9,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use super::{
-    App, ID_TRAY, IDM_EXIT, IDM_LONGSHOT, IDM_SETTINGS, IDM_SHOT, WM_TRAY, icon_resource, popmenu, wide_array,
-};
+use super::{App, ID_TRAY, IDM_EXIT, IDM_SETTINGS, IDM_SHOT, WM_TRAY, icon_resource, popmenu, wide_array};
 use std::mem::size_of;
 
 impl App {
@@ -79,7 +77,6 @@ impl App {
     pub fn handle_command(&mut self, id: u16) {
         match id as usize {
             IDM_SHOT => self.start_capture(),
-            IDM_LONGSHOT => self.not_yet("长截图功能", "M4 里程碑"),
             IDM_SETTINGS => self.open_settings(),
             IDM_EXIT => unsafe {
                 let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
