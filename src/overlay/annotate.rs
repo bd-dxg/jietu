@@ -77,6 +77,8 @@ impl super::Overlay {
             toolbar::Action::Redo => return self.on_redo(),
             // PIN-1：贴图按钮 → 选区贴图后覆盖层自行关闭（不复绘）
             toolbar::Action::Pin => return self.on_pin(),
+            // M4：长截图按钮 → 选区作为视口进入拼接（不复绘）
+            toolbar::Action::Longshot => return self.on_longshot(),
         }
         // 仅工具栏自身外观发生变化
         let bar = self.bar.as_ref().map(|b| b.rect);
@@ -170,6 +172,22 @@ impl super::Overlay {
         self.cancelled = false;
         unsafe {
             let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+    }
+
+    /// 长截图（M4，LNG-1）：记录屏幕坐标选区并关闭覆盖层，由 app 线程启动拼接。
+    pub(super) fn on_longshot(&mut self) {
+        if let Some(sel) = self.selection {
+            self.viewport = Some((
+                sel.x + self.capture.origin_x,
+                sel.y + self.capture.origin_y,
+                sel.w as u32,
+                sel.h as u32,
+            ));
+            self.cancelled = false;
+            unsafe {
+                let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
         }
     }
 

@@ -127,6 +127,8 @@ pub struct Config {
     pub pin_position: PinPosition,
     /// 贴图 1px 蓝色边框（M2b，默认开）。
     pub pin_border: bool,
+    /// 长截图拼接高度上限（像素，LNG-7，默认 30000）。
+    pub longshot_max_height: u32,
 }
 
 impl Default for Config {
@@ -140,6 +142,7 @@ impl Default for Config {
             hotkey_warned: false,
             pin_position: PinPosition::Original,
             pin_border: true,
+            longshot_max_height: 30000,
         }
     }
 }

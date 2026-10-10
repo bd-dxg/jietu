@@ -3,6 +3,7 @@
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
+use windows::Win32::UI::Input::Ime::ImmGetVirtualKey;
 use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -115,17 +116,26 @@ pub(super) unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARA
                 overlay.on_text_key(wparam.0 as u32, shift_down(), ctrl_down());
                 return LRESULT(0);
             }
+            // 中文输入法活动时，按键会被改写为 VK_PROCESSKEY(0xE5)，真实键另存。
+            // 不禁用 IME（文本工具需要），改用 ImmGetVirtualKey 取回真实 vk，
+            // 否则 IME 开启状态下按 S/F3/回车等全部失效（M4 实测缺陷）。
+            let vk = if wparam.0 as u32 == 0xE5 {
+                unsafe { ImmGetVirtualKey(hwnd) }
+            } else {
+                wparam.0 as u32
+            };
             // 空格按下立即切抓手光标：系统只在鼠标移动时发 WM_SETCURSOR，不能等它
-            if wparam.0 as u32 == 0x20 {
+            if vk == 0x20 {
                 apply_cursor(hwnd, true);
                 return LRESULT(0);
             }
-            match wparam.0 as u32 {
+            match vk {
                 0x1B => overlay.on_cancel(),              // Esc
                 0x72 => overlay.on_pin(),                 // PIN-1：F3 贴选区（截图期间全局 F3 已撤销）
                 0x0D => overlay.on_copy(),                // Enter
                 0x43 if ctrl_down() => overlay.on_copy(), // Ctrl+C
                 0x53 if ctrl_down() => overlay.on_save(), // Ctrl+S
+                0x53 => overlay.on_longshot(),            // M4：S 长截图（当前选区为视口）
                 0x5A if ctrl_down() => {
                     // Ctrl+Z 撤销 / Ctrl+Shift+Z 重做（EDT-7）
                     if shift_down() {
@@ -138,7 +148,7 @@ pub(super) unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARA
                 _ => {
                     // 工具切换键（M3）：任意键都查映射（不限于数字键），
                     // 以便设置面板可把工具键改为字母等
-                    if let Some(t) = overlay.tool_by_key(wparam.0 as u32) {
+                    if let Some(t) = overlay.tool_by_key(vk) {
                         overlay.switch_tool(t);
                     }
                 }

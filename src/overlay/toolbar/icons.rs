@@ -296,3 +296,40 @@ pub(super) fn pin_icon(pixmap: &mut Pixmap, r: SelRect, color: [u8; 4]) {
         pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
     }
 }
+
+/// 长截图按钮图标（M4）：上下两层页面 + 向下箭头，表示纵向延伸拼接。
+pub(super) fn longshot_icon(pixmap: &mut Pixmap, r: SelRect, color: [u8; 4]) {
+    let paint = paint_of(color);
+    // 上层页面（小矩形）
+    let top = Rect::from_xywh(r.x as f32 + 6.0, r.y as f32 + 5.0, 12.0, 9.0);
+    if let Some(top) = top {
+        let mut pb = PathBuilder::new();
+        pb.push_rect(top);
+        if let Some(path) = pb.finish() {
+            pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
+        }
+    }
+    // 下层页面（大矩形）
+    let bottom = Rect::from_xywh(r.x as f32 + 6.0, r.y as f32 + 13.0, 14.0, 8.0);
+    if let Some(bottom) = bottom {
+        let mut pb = PathBuilder::new();
+        pb.push_rect(bottom);
+        if let Some(path) = pb.finish() {
+            let stroke = tiny_skia::Stroke {
+                width: 1.6,
+                ..Default::default()
+            };
+            pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+        }
+    }
+    // 向下箭头（页面下方）
+    let (ax, ay) = (r.x as f32 + 13.0, r.y as f32 + 21.0);
+    let mut tri = PathBuilder::new();
+    tri.move_to(ax - 3.5, ay - 2.5);
+    tri.line_to(ax + 3.5, ay - 2.5);
+    tri.line_to(ax, ay + 2.5);
+    tri.close();
+    if let Some(path) = tri.finish() {
+        pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
+    }
+}

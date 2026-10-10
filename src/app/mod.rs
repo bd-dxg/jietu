@@ -43,7 +43,6 @@ pub const ID_HOTKEY_PIN: i32 = 102;
 
 /// 托盘菜单项 id（供 `tray` 子模块使用）。
 pub const IDM_SHOT: usize = 40001;
-pub const IDM_LONGSHOT: usize = 40002;
 pub const IDM_SETTINGS: usize = 40003;
 pub const IDM_EXIT: usize = 40004;
 
@@ -132,6 +131,7 @@ impl App {
     pub fn start_capture(&self) {
         let hinstance = self.hinstance.0 as usize;
         let main_hwnd = self.hwnd.0 as usize; // HWND 非 Send，跨线程传原生值
+        let max_height = self.config.longshot_max_height;
         // 截图期间撤销贴图全局热键：F3 在覆盖层内走「贴选区」（PIN-1），
         // 否则 WM_HOTKEY 与覆盖层 WM_KEYDOWN 同时收到 F3 会双重触发（一次贴选区一次贴剪贴板）。
         OVERLAY_RUNNING.store(true, Ordering::Release);
@@ -146,7 +146,12 @@ impl App {
             let main_hwnd = HWND(main_hwnd as *mut _);
             match crate::capture::capture_virtual_screen() {
                 Ok(screen) => {
-                    crate::overlay::Overlay::run(screen, palette, tool_keys, default_tool, hinstance, main_hwnd);
+                    let result =
+                        crate::overlay::Overlay::run(screen, palette, tool_keys, default_tool, hinstance, main_hwnd);
+                    // M4：工具栏长截图按钮 / S 键返回视口选区，进入长截图拼接。
+                    if let crate::overlay::OverlayResult::Viewport((x, y, w, h)) = result {
+                        crate::longshot::run(x, y, w, h, hinstance, max_height, palette);
+                    }
                 }
                 Err(e) => message_box(None, &format!("抓屏失败：{e}"), MB_OK | MB_ICONERROR),
             }
